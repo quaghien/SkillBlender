@@ -31,6 +31,18 @@
 import numpy as np
 import os
 from datetime import datetime
+import sys
+
+# Extract --num_envs before importing to avoid gymutil error
+num_envs_override = -1
+if "--num_envs" in sys.argv:
+    try:
+        idx = sys.argv.index("--num_envs")
+        num_envs_override = int(sys.argv[idx + 1])
+        # Remove from sys.argv so gymutil doesn't see it
+        del sys.argv[idx:idx+2]
+    except (IndexError, ValueError):
+        pass
 
 import isaacgym
 from legged_gym.envs import *
@@ -39,6 +51,9 @@ import torch
 import wandb
 
 def train(args):
+    # Set num_envs override after args are parsed
+    if num_envs_override > 0:
+        args.num_envs = num_envs_override
     wandb.init(project=args.wandb, name=args.run_name, entity=args.entity)
     
     # # NOTE: wandb save files, need to change after using other envs

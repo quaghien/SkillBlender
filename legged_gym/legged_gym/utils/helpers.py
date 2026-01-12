@@ -127,10 +127,10 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
 def update_cfg_from_args(env_cfg, train_cfg, args):
     # seed
     if env_cfg is not None:
-        pass
-        # # num envs
-        # if args.num_envs is not None:
-        #     env_cfg.env.num_envs = args.num_envs
+        # num envs - allow override via command line argument
+        if hasattr(args, 'num_envs') and args.num_envs > 0:
+            env_cfg.env.num_envs = args.num_envs
+            print(f'Override num_envs to {args.num_envs} from args')
     if train_cfg is not None:
         # alg runner parameters
         if args.resume:
@@ -147,6 +147,20 @@ def update_cfg_from_args(env_cfg, train_cfg, args):
     return env_cfg, train_cfg
 
 def get_args(test=False):
+    import sys
+    import argparse
+    
+    # Manual parsing for --num_envs since gymutil.parse_arguments doesn't support it
+    num_envs = -1
+    if "--num_envs" in sys.argv:
+        try:
+            idx = sys.argv.index("--num_envs")
+            num_envs = int(sys.argv[idx + 1])
+            # Remove from sys.argv so gymutil doesn't see it (pop backwards to avoid index shift)
+            del sys.argv[idx:idx+2]
+        except (IndexError, ValueError):
+            pass
+    
     custom_parameters = [
         {"name": "--task", "type": str, "default": "h1", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
@@ -171,6 +185,7 @@ def get_args(test=False):
         custom_parameters=custom_parameters)
     
     args.test = test
+    args.num_envs = num_envs  # Add the parsed num_envs
 
     # name allignment
     args.sim_device_id = args.compute_device_id
