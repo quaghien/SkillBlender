@@ -46,6 +46,11 @@ class RolloutStorage:
             self.action_mean = None
             self.action_sigma = None
             self.hidden_states = None
+            # HRL-specific fields for proper log_prob computation
+            self.hrl_skill_exec = None       # [num_envs] int64
+            self.hrl_command_raw = None      # [num_envs, 14] float
+            self.hrl_residual_raw = None     # [num_envs, 19] float
+            self.hrl_is_held = None          # [num_envs] bool
         
         def clear(self):
             self.__init__()
@@ -83,6 +88,12 @@ class RolloutStorage:
         # rnn
         self.saved_hidden_states_a = None
         self.saved_hidden_states_c = None
+        
+        # HRL-specific storage (lazy init - only if HRL policy is used)
+        self.hrl_skill_exec = None
+        self.hrl_command_raw = None
+        self.hrl_residual_raw = None
+        self.hrl_is_held = None
 
         self.step = 0
 
@@ -110,6 +121,20 @@ class RolloutStorage:
         self.mu[self.step].copy_(transition.action_mean)
         self.sigma[self.step].copy_(transition.action_sigma)
         self._save_hidden_states(transition.hidden_states)
+        
+        # HRL-specific: save skill/command/residual info for proper log_prob in update
+        if transition.hrl_skill_exec is not None:
+            # Lazy init HRL storage
+            if self.hrl_skill_exec is None:
+                self.hrl_skill_exec = torch.zeros(self.num_transitions_per_env, self.num_envs, dtype=torch.long, device=self.device)
+                self.hrl_command_raw = torch.zeros(self.num_transitions_per_env, self.num_envs, transition.hrl_command_raw.shape[-1], device=self.device)
+                self.hrl_residual_raw = torch.zeros(self.num_transitions_per_env, self.num_envs, transition.hrl_residual_raw.shape[-1], device=self.device)
+                self.hrl_is_held = torch.zeros(self.num_transitions_per_env, self.num_envs, dtype=torch.bool, device=self.device)
+            self.hrl_skill_exec[self.step].copy_(transition.hrl_skill_exec)
+            self.hrl_command_raw[self.step].copy_(transition.hrl_command_raw)
+            self.hrl_residual_raw[self.step].copy_(transition.hrl_residual_raw)
+            self.hrl_is_held[self.step].copy_(transition.hrl_is_held)
+        
         self.step += 1
 
     def _save_hidden_states(self, hidden_states):
@@ -175,6 +200,12 @@ class RolloutStorage:
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
 
+        # HRL: flatten if exists
+        hrl_skill_exec_flat = self.hrl_skill_exec.flatten(0, 1) if self.hrl_skill_exec is not None else None
+        hrl_command_raw_flat = self.hrl_command_raw.flatten(0, 1) if self.hrl_command_raw is not None else None
+        hrl_residual_raw_flat = self.hrl_residual_raw.flatten(0, 1) if self.hrl_residual_raw is not None else None
+        hrl_is_held_flat = self.hrl_is_held.flatten(0, 1) if self.hrl_is_held is not None else None
+        
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
 
@@ -191,13 +222,24 @@ class RolloutStorage:
                 advantages_batch = advantages[batch_idx]
                 old_mu_batch = old_mu[batch_idx]
                 old_sigma_batch = old_sigma[batch_idx]
+                
+                # HRL: extract batch if exists
+                hrl_info_batch = None
+                if hrl_skill_exec_flat is not None:
+                    hrl_info_batch = {
+                        'skill_exec': hrl_skill_exec_flat[batch_idx],
+                        'command_raw': hrl_command_raw_flat[batch_idx],
+                        'residual_raw': hrl_residual_raw_flat[batch_idx],
+                        'is_held': hrl_is_held_flat[batch_idx],
+                    }
+                
                 if self.observations_vision is not None:
                     obs_vision_batch = self.observations_vision.flatten(0, 1)[batch_idx]
                     yield (obs_batch, obs_vision_batch), (critic_observations_batch, obs_vision_batch), actions_batch, target_values_batch, advantages_batch, returns_batch, \
-                           old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None),  None
+                           old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None), None, hrl_info_batch
                 else:
                     yield obs_batch, critic_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, \
-                           old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None), None
+                           old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None), None, hrl_info_batch
 
     # for RNNs only
     def recurrent_mini_batch_generator(self, num_mini_batches, num_epochs=5):
@@ -247,6 +289,6 @@ class RolloutStorage:
                 hid_c_batch = hid_c_batch[0] if len(hid_c_batch)==1 else hid_a_batch
 
                 yield obs_batch, critic_obs_batch, actions_batch, values_batch, advantages_batch, returns_batch, \
-                       old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (hid_a_batch, hid_c_batch), masks_batch
+                       old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (hid_a_batch, hid_c_batch), masks_batch, None  # HRL: None for recurrent (not supported)
                 
                 first_traj = last_traj

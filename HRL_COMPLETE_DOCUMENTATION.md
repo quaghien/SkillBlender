@@ -1,6 +1,6 @@
 # HRL (Hierarchical Reinforcement Learning) - COMPLETE TECHNICAL DOCUMENTATION
 
-**Version:** v4.2 PPO-Correct + Command Clamping  
+**Version:** v6.0 PPO-Correct + HRL Storage Fix  
 **Last Updated:** 2026-01-13  
 **File:** `rsl_rl/rsl_rl/modules/actor_critic_hrl_simple.py`
 
@@ -16,7 +16,9 @@
 | **Critic Input** | 303D (3 frames × 101D) |
 | **Command Output** | 14D (split into 4 skill slices) |
 | **Episode Length** | 1000 steps (20s × 50Hz) |
-| **Learning Rate** | 3e-4 (fixed) |
+| **Learning Rate** | 1e-5 (fixed, author's value) |
+| **Num Envs** | 16384 |
+| **Batch Size** | 983,040 (16384 × 60) |
 
 ---
 
@@ -500,7 +502,84 @@ def get_log_prob(self, skill_exec, command_full_raw, residual_raw, is_held):
     return torch.clamp(total, -100, 100)  # Prevent extreme values
 ```
 
-### 6.2 Tại sao dùng `command_full_raw`?
+### 6.2 HRL Storage Fix (CRITICAL)
+
+**Vấn đề:** PPO update phase gọi `act(obs_batch)` rồi `get_actions_log_prob(actions_batch)`. 
+Với HRL policy, `act()` sẽ **sample MỚI** skill/command/residual → `last_info` không khớp với stored actions → **ratio explode!**
+
+**Giải pháp:** Lưu HRL info vào RolloutStorage và dùng `get_actions_log_prob_hrl()` trong update phase.
+
+#### RolloutStorage Changes
+```python
+# Transition class - thêm HRL fields
+class Transition:
+    def __init__(self):
+        ...
+        self.hrl_skill_exec = None       # [num_envs] int64
+        self.hrl_command_raw = None      # [num_envs, 14] float  
+        self.hrl_residual_raw = None     # [num_envs, 19] float
+        self.hrl_is_held = None          # [num_envs] bool
+```
+
+#### PPO Changes
+```python
+# In act() - save HRL info
+if hasattr(self.actor_critic, 'last_info'):
+    info = self.actor_critic.last_info
+    self.transition.hrl_skill_exec = info['skill_exec'].detach()
+    self.transition.hrl_command_raw = info['command_full_raw'].detach()
+    self.transition.hrl_residual_raw = info['residual_raw'].detach()
+    self.transition.hrl_is_held = info['is_held'].detach()
+
+# In update() - use stored info for log_prob
+if hrl_info_batch is not None:
+    actions_log_prob_batch = self.actor_critic.get_actions_log_prob_hrl(
+        obs_batch,
+        hrl_info_batch['skill_exec'],
+        hrl_info_batch['command_raw'],
+        hrl_info_batch['residual_raw'],
+        hrl_info_batch['is_held']
+    )
+```
+
+#### ActorCriticHRLSimple - New Method
+```python
+def get_actions_log_prob_hrl(self, obs, skill_exec, command_raw, residual_raw, is_held):
+    """
+    PPO update phase: Recompute distributions from obs and evaluate log_prob
+    for the STORED actions (not newly sampled ones).
+    """
+    # 1. Recompute distributions from current policy
+    features = self.actor_backbone(obs)
+    _, gating_probs = self.gating_head(features)
+    gating_dist = Categorical(probs=gating_probs)
+    cmd_mean, cmd_std = self.command_head(features)
+    res_mean, res_std = self.residual_head(features)
+    
+    # 2. Compute log_prob using STORED actions
+    log_prob_gating = gating_dist.log_prob(skill_exec) * (~is_held).float()
+    
+    log_prob_cmd = torch.zeros(batch_size, device=self.device)
+    for skill_id in range(self.num_skills):
+        mask = (skill_exec == skill_id)
+        if mask.any():
+            s = self.SKILL_CMD_SLICES[skill_id]
+            log_prob_cmd[mask] = Normal(cmd_mean[mask, s], cmd_std[mask, s]).log_prob(
+                command_raw[mask, s]).sum(-1)
+    
+    log_prob_res = Normal(res_mean, res_std).log_prob(residual_raw).sum(-1)
+    
+    return torch.clamp(log_prob_gating + log_prob_cmd + log_prob_res, -100, 100)
+```
+
+**Kết quả sau fix:**
+| Metric | Trước (Bug) | Sau (Fixed) |
+|--------|-------------|-------------|
+| Surrogate loss | 1e6 ~ 1e8 | **~0** ✅ |
+| Value loss | 100 ~ 1000 | **29 ~ 800** |
+| Ratio | explode | **~1** ✅ |
+
+### 6.3 Tại sao dùng `command_full_raw`?
 
 | Scenario | What to use |
 |----------|-------------|
@@ -517,7 +596,7 @@ PPO cần biết probability của **what was sampled**, không phải what was 
 ```python
 class H1HRLCfg:
     class env:
-        num_envs = 4096
+        num_envs = 16384
         num_actions = 19
         num_observations = 105
         num_privileged_obs = 303
@@ -528,19 +607,19 @@ class H1HRLCfg:
         action_scale = 0.25
 ```
 
-### 7.2 Algorithm
+### 7.2 Algorithm (Author's Values)
 ```python
 class algorithm:
-    learning_rate = 3e-4
+    learning_rate = 1e-5      # Author's value for HRL tasks
     schedule = 'fixed'        # NOT adaptive!
-    num_learning_epochs = 5
+    num_learning_epochs = 2   # Author's value (less epochs)
     num_mini_batches = 4
     clip_param = 0.2
-    entropy_coef = 0.01
+    entropy_coef = 0.001      # Author's value (10x smaller)
     value_loss_coef = 1.0
     max_grad_norm = 1.0
-    gamma = 0.99
-    lam = 0.95
+    gamma = 0.994             # Author's value (higher)
+    lam = 0.9                 # Author's value (lower)
 ```
 
 ### 7.3 Training Phases
@@ -555,27 +634,36 @@ class algorithm:
 
 ```
 SkillBlender/
-├── rsl_rl/rsl_rl/modules/
-│   └── actor_critic_hrl_simple.py   ← Main policy file
+├── rsl_rl/rsl_rl/
+│   ├── modules/
+│   │   └── actor_critic_hrl_simple.py   ← Main policy (with get_actions_log_prob_hrl)
+│   ├── algorithms/
+│   │   └── ppo.py                       ← PPO (with HRL info handling)
+│   └── storage/
+│       └── rollout_storage.py           ← Storage (with HRL fields)
 │
 ├── legged_gym/legged_gym/
 │   ├── envs/h1/h1_hrl/
-│   │   └── h1_hrl.py                ← Environment
+│   │   └── h1_hrl.py                    ← Environment + Config
 │   ├── envs/h1/h1_walking/
-│   │   └── h1_walking_config.py     ← Walking ranges
+│   │   └── h1_walking_config.py         ← Walking ranges
 │   ├── envs/h1/h1_reaching/
-│   │   └── h1_reaching_config.py    ← Reaching ranges
+│   │   └── h1_reaching_config.py        ← Reaching ranges
 │   ├── envs/h1/h1_squatting/
-│   │   └── h1_squatting_config.py   ← Squatting ranges
+│   │   └── h1_squatting_config.py       ← Squatting ranges
 │   └── envs/h1/h1_stepping/
-│       └── h1_stepping_config.py    ← Stepping ranges
+│       └── h1_stepping_config.py        ← Stepping ranges
 │
-└── HRL_COMPLETE_DOCUMENTATION.md    ← This file
+└── HRL_COMPLETE_DOCUMENTATION.md        ← This file
 ```
 
 ---
 
 ## 9. TROUBLESHOOTING
+
+### Surrogate loss = 1e6 ~ 1e8?
+→ **HRL Storage bug!** PPO đang dùng wrong skill/command/residual.
+→ Fix: Ensure `get_actions_log_prob_hrl()` được gọi với stored `hrl_info_batch`.
 
 ### Robot ngã ngay khi training?
 → Command vượt quá valid range. Check clamp logic đã được apply chưa.
@@ -589,6 +677,10 @@ SkillBlender/
 ### Wrist position không đúng?
 → Reaching command là DELTA position, không phải absolute. Check offset trong env.
 
+### Episode length quá ngắn (~24)?
+→ Đây là số **steps**, không phải seconds. Với `num_steps_per_env=60`, robot đang terminate sớm.
+→ Check termination conditions trong `h1_hrl.py`.
+
 ---
 
 ## 10. TRAINING COMMAND
@@ -596,18 +688,31 @@ SkillBlender/
 ```bash
 cd /home/crl/hienhq/SkillBlender/legged_gym
 
-python legged_gym/scripts/train_hrl.py \
+conda activate qhrl && python legged_gym/scripts/train_hrl.py \
     --task h1_hrl \
-    --run_name hrl_v4_clamped \
-    --num_envs 8192 \
+    --run_name hrl_v6_storage_fix \
+    --num_envs 16384 \
     --max_iterations 100000 \
     --sim_device cuda:0 \
     --rl_device cuda:0 \
     --headless \
-    --wandb hrl_v4
+    --wandb hrl_v6
 ```
+
+**GPU Memory:** ~12-15 GB with 16384 envs × 60 steps (983K batch)
+
+---
+
+## 11. CHANGELOG
+
+| Version | Date | Changes |
+|---------|------|--------|
+| v6.0 | 2026-01-13 | **HRL Storage Fix** - Store skill/command/residual in RolloutStorage, add `get_actions_log_prob_hrl()` |
+| v5.0 | 2026-01-13 | Author's config (LR=1e-5, epochs=2, entropy=0.001, gamma=0.994) |
+| v4.2 | 2026-01-13 | Command clamping to valid ranges |
+| v4.0 | 2026-01-13 | PPO-Correct log_prob (gating×command×residual) |
 
 ---
 
 **Document Status:** Complete  
-**Code Version:** v4.2 (PPO-Correct + Command Clamping)
+**Code Version:** v6.0 (HRL Storage Fix + Command Clamping + Author's Config)

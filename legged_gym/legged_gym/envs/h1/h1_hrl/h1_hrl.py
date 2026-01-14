@@ -19,7 +19,7 @@ class H1HRLCfg(LeggedRobotCfg):
     """Configuration for 8-task HRL meta-environment"""
     
     class env(LeggedRobotCfg.env):
-        num_envs = 4096
+        num_envs = 16384
         num_actions = 19  # H1 DOFs
         frame_stack = 1
         c_frame_stack = 3
@@ -137,20 +137,20 @@ class H1HRLCfgPPO(LeggedRobotCfgPPO):
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.01
-        num_learning_epochs = 5
+        entropy_coef = 0.001  # Author's value (was 0.01)
+        num_learning_epochs = 2  # Author's value (was 5)
         num_mini_batches = 4
-        learning_rate = 3.0e-4  # Fixed LR for HRL stability
+        learning_rate = 1e-5  # Author's value for HRL tasks
         schedule = 'fixed'  # IMPORTANT: disable adaptive to prevent LR explosion
-        gamma = 0.99
-        lam = 0.95
+        gamma = 0.994  # Author's value (was 0.99)
+        lam = 0.9  # Author's value (was 0.95)
         desired_kl = 0.01  # Not used with fixed schedule
         max_grad_norm = 1.0
         
     class runner:
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
-        num_steps_per_env = 24
+        num_steps_per_env = 60  # Author's value (was 24)
         max_iterations = 100000
         save_interval = 1000
         experiment_name = 'h1_hrl'

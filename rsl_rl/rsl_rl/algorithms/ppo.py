@@ -98,6 +98,16 @@ class PPO:
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
         self.transition.critic_observations = critic_obs
+        
+        # HRL-specific: save skill/command/residual info for proper log_prob in update
+        if hasattr(self.actor_critic, 'last_info') and self.actor_critic.last_info is not None:
+            info = self.actor_critic.last_info
+            self.transition.hrl_skill_exec = info['skill_exec'].detach()
+            # Use command_full_raw (what was sampled) for log_prob, not command_full (clamped)
+            self.transition.hrl_command_raw = info.get('command_full_raw', info['command_full']).detach()
+            self.transition.hrl_residual_raw = info['residual_raw'].detach()
+            self.transition.hrl_is_held = info['is_held'].detach()
+        
         return self.transition.actions
     
     def process_env_step(self, rewards, dones, infos):
@@ -133,15 +143,30 @@ class PPO:
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-            old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
+            old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch, hrl_info_batch in generator:
 
-
-                self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
-                actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
-                value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
-                mu_batch = self.actor_critic.action_mean
-                sigma_batch = self.actor_critic.action_std
-                entropy_batch = self.actor_critic.entropy
+                # For HRL policy: use stored skill/command/residual info for correct log_prob
+                if hrl_info_batch is not None and hasattr(self.actor_critic, 'get_actions_log_prob_hrl'):
+                    # Don't re-sample! Just recompute distributions from obs and evaluate log_prob
+                    actions_log_prob_batch = self.actor_critic.get_actions_log_prob_hrl(
+                        obs_batch,
+                        hrl_info_batch['skill_exec'],
+                        hrl_info_batch['command_raw'],
+                        hrl_info_batch['residual_raw'],
+                        hrl_info_batch['is_held']
+                    )
+                    value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
+                    mu_batch = self.actor_critic.action_mean
+                    sigma_batch = self.actor_critic.action_std
+                    entropy_batch = self.actor_critic.entropy
+                else:
+                    # Standard PPO: re-run forward and get log_prob
+                    self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
+                    actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
+                    value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
+                    mu_batch = self.actor_critic.action_mean
+                    sigma_batch = self.actor_critic.action_std
+                    entropy_batch = self.actor_critic.entropy
 
                 # KL
                 if self.desired_kl != None and self.schedule == 'adaptive':

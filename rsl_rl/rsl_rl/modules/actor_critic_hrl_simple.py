@@ -443,9 +443,70 @@ class ActorCriticHRLSimple(nn.Module):
             self.last_info['is_held']
         )
     
+    def get_actions_log_prob_hrl(self, obs, skill_exec, command_raw, residual_raw, is_held):
+        """
+        PPO update phase: Recompute distributions from obs and evaluate log_prob
+        for the STORED actions (skill_exec, command_raw, residual_raw).
+        
+        This is the CORRECT way to compute log_prob for HRL:
+        - We recompute the distribution parameters from the current policy (obs -> features -> heads)
+        - We evaluate log_prob of the STORED actions, not newly sampled ones
+        
+        Args:
+            obs: [batch, obs_dim] observations
+            skill_exec: [batch] stored skill IDs (int64)
+            command_raw: [batch, 14] stored raw command values (before clamping)
+            residual_raw: [batch, 19] stored raw residual values
+            is_held: [batch] whether skill was held from previous step (bool)
+        
+        Returns:
+            log_prob: [batch] total log probability
+        """
+        batch_size = obs.shape[0]
+        
+        # 1. Recompute distributions from current policy parameters
+        features = self.actor_backbone(obs)
+        
+        # 2. Gating distribution
+        _, gating_probs = self.gating_head(features)
+        gating_dist = Categorical(probs=gating_probs)
+        self.last_gating_dist = gating_dist  # For entropy property
+        
+        # 3. Command distribution
+        cmd_mean, cmd_std = self.command_head(features)
+        self.last_command_dist = Normal(cmd_mean, cmd_std)  # For entropy property
+        
+        # 4. Residual distribution
+        res_mean, res_std = self.residual_head(features)
+        res_dist = Normal(res_mean, res_std)
+        self.last_residual_dist = res_dist  # For entropy property
+        
+        # 5. Compute log_probs using STORED actions
+        # Gating: 0 if held (don't penalize past decision)
+        log_prob_gating = gating_dist.log_prob(skill_exec)
+        log_prob_gating = log_prob_gating * (~is_held).float()
+        
+        # Command: only log_prob of USED slice per skill
+        log_prob_cmd = torch.zeros(batch_size, device=self.device)
+        for skill_id in range(self.num_skills):
+            mask = (skill_exec == skill_id)
+            if not mask.any():
+                continue
+            cmd_slice = self.SKILL_CMD_SLICES[skill_id]
+            cmd_used = command_raw[mask, cmd_slice]  # Use stored raw values
+            lp = Normal(cmd_mean[mask, cmd_slice], cmd_std[mask, cmd_slice]).log_prob(cmd_used).sum(-1)
+            log_prob_cmd[mask] = lp
+        
+        # Residual: full 19D
+        log_prob_res = res_dist.log_prob(residual_raw).sum(dim=-1)
+        
+        # 6. Clamp total to prevent extreme values
+        log_prob_total = log_prob_gating + log_prob_cmd + log_prob_res
+        return torch.clamp(log_prob_total, -100, 100)
+    
     def evaluate_actions(self, obs, skill_exec, command_full, residual_raw, is_held):
         """
-        Re-evaluate for PPO update phase.
+        Re-evaluate for PPO update phase (legacy method).
         Must recompute distributions from obs.
         """
         # 1. Backbone
