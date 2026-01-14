@@ -119,6 +119,15 @@ class PPO:
     def update(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
+        # Debug metrics for monitoring stability
+        self.debug_ratio_mean = 0
+        self.debug_ratio_max = 0
+        self.debug_kl_approx = 0
+        self.debug_clipfrac = 0
+        self.debug_adv_mean = 0
+        self.debug_adv_std = 0
+        self.debug_adv_max = 0
+        
         if self.actor_critic.is_recurrent:
             generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
@@ -144,7 +153,7 @@ class PPO:
                         if kl_mean > self.desired_kl * 2.0:
                             self.learning_rate = max(1e-5, self.learning_rate / 1.5)
                         elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+                            self.learning_rate = min(3e-4, self.learning_rate * 1.5)  # FIXED: Max LR capped at 3e-4 (was 1e-2)
                         
                         for param_group in self.optimizer.param_groups:
                             param_group['lr'] = self.learning_rate
@@ -152,6 +161,22 @@ class PPO:
 
                 # Surrogate loss
                 ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
+                
+                # Debug: track ratio stats for monitoring stability
+                with torch.no_grad():
+                    self.debug_ratio_mean = ratio.mean().item()
+                    self.debug_ratio_max = ratio.max().item()
+                    # Approx KL from log ratio
+                    log_ratio = actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch)
+                    self.debug_kl_approx = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
+                    # Clip fraction
+                    self.debug_clipfrac = ((ratio - 1.0).abs() > self.clip_param).float().mean().item()
+                    # Advantage stats
+                    adv = torch.squeeze(advantages_batch)
+                    self.debug_adv_mean = adv.mean().item()
+                    self.debug_adv_std = adv.std().item()
+                    self.debug_adv_max = adv.abs().max().item()
+                
                 surrogate = -torch.squeeze(advantages_batch) * ratio
                 surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param,
                                                                                 1.0 + self.clip_param)

@@ -69,6 +69,8 @@ from .h1.h1_task_transfer.h1_task_transfer_config import H1TaskTransferCfg, H1Ta
 ### H1 CabinetClose
 from .h1.h1_task_cabinet.h1_task_cabinet import H1TaskCabinet
 from .h1.h1_task_cabinet.h1_task_cabinet_config import H1TaskCabinetCfg, H1TaskCabinetCfgPPO
+### H1 HRL (Meta Environment)
+from .h1.h1_hrl.h1_hrl import H1HRLEnv, H1HRLCfg, H1HRLCfgPPO
 # G1
 ## Primitive Skills
 ### G1 Walking
@@ -162,6 +164,7 @@ task_registry.register( "h1_task_ball", H1TaskBall, H1TaskBallCfg(), H1TaskBallC
 task_registry.register( "h1_task_carry", H1TaskCarry, H1TaskCarryCfg(), H1TaskCarryCfgPPO(), 'h1/h1_task_carry')
 task_registry.register( "h1_task_transfer", H1TaskTransfer, H1TaskTransferCfg(), H1TaskTransferCfgPPO(), 'h1/h1_task_transfer')
 task_registry.register( "h1_task_cabinet", H1TaskCabinet, H1TaskCabinetCfg(), H1TaskCabinetCfgPPO(), 'h1/h1_task_cabinet')
+task_registry.register( "h1_hrl", H1HRLEnv, H1HRLCfg(), H1HRLCfgPPO(), 'h1/h1_hrl')
 task_registry.register( "g1_walking", G1Walking, G1WalkingCfg(), G1WalkingCfgPPO(), 'g1/g1_walking')
 task_registry.register( "g1_reaching", G1Reaching, G1ReachingCfg(), G1ReachingCfgPPO(), 'g1/g1_reaching')
 task_registry.register( "g1_stepping", G1Stepping, G1SteppingCfg(), G1SteppingCfgPPO(), 'g1/g1_stepping')

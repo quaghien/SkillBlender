@@ -10,9 +10,11 @@ python legged_gym/scripts/train.py --task h1_walking --wandb hqh_h1_walking --ru
 python legged_gym/scripts/train.py --task h1_walking --wandb hqh_24_12_walking --run_name h1_walking --sim_device cuda:0 --rl_device cuda:0  --num_envs 4
 ```
 
-python legged_gym/scripts/train.py --task h1_task_ball --run_name h1_task_ball --sim_device cuda:0 --rl_device cuda:0
+python legged_gym/scripts/train.py --task h1_task_reach --run_name h1_task_reach --headless --sim_device cuda:0 --rl_device cuda:0
 
+python legged_gym/scripts/train.py --task h1_task_button --run_name h1_task_button --headless --sim_device cuda:0 --rl_device cuda:0
 
+python legged_gym/scripts/train.py --task h1_task_carry --run_name h1_task_carry --headless --sim_device cuda:0 --rl_device cuda:0
 
 python legged_gym/scripts/play.py --task h1_walking  --experiment_name h1_walking  --load_run 0000_best --checkpoint -1 --sim_device cuda:0 --rl_device cuda:0  --visualize
 

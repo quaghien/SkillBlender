@@ -224,6 +224,17 @@ class OnPolicyRunner:
         wandb_dict['Loss/surrogate'] = locs['mean_surrogate_loss']
         wandb_dict['Loss/entropy'] = entropy
         wandb_dict['Loss/learning_rate'] = self.alg.learning_rate
+        
+        # Debug metrics for stability monitoring
+        if hasattr(self.alg, 'debug_ratio_mean'):
+            wandb_dict['Debug/ratio_mean'] = self.alg.debug_ratio_mean
+            wandb_dict['Debug/ratio_max'] = self.alg.debug_ratio_max
+            wandb_dict['Debug/kl_approx'] = self.alg.debug_kl_approx
+            wandb_dict['Debug/clipfrac'] = self.alg.debug_clipfrac
+            wandb_dict['Debug/adv_mean'] = self.alg.debug_adv_mean
+            wandb_dict['Debug/adv_std'] = self.alg.debug_adv_std
+            wandb_dict['Debug/adv_max'] = self.alg.debug_adv_max
+        
         wandb_dict['Perf/total_fps'] = fps
         wandb_dict['Perf/collection time'] = locs['collection_time']
         wandb_dict['Perf/learning_time'] = locs['learn_time']
