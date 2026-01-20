@@ -19,7 +19,7 @@ class H1HRLCfg(LeggedRobotCfg):
     """Configuration for 8-task HRL meta-environment"""
     
     class env(LeggedRobotCfg.env):
-        num_envs = 16384
+        num_envs = 4096
         num_actions = 19  # H1 DOFs
         frame_stack = 1
         c_frame_stack = 3
@@ -123,34 +123,102 @@ class H1HRLCfg(LeggedRobotCfg):
 
 
 class H1HRLCfgPPO(LeggedRobotCfgPPO):
-    """PPO configuration for HRL training"""
+    """PPO configuration for HRL training with pretrained low-level skills"""
     seed = 5  # Same as author's single-task configs (5 for reproducibility, -1 for random)
-    runner_class_name = 'OnPolicyRunner'
+    runner_class_name = 'OnPolicyRunnerHRL'  # HRL runner
     
     class policy:
         init_noise_std = 0.5
-        actor_hidden_dims = [512, 256, 128]
+        # High-level network architecture
+        actor_hidden_dims = [256, 256, 256]
         critic_hidden_dims = [512, 256, 128]
         activation = 'elu'
         
+        # Low-level skill parameters
+        num_skills = 4
+        frame_stack = 1
+        command_dim = 3  # Original env command dim (will be replaced per skill)
+        num_dofs = 19
+        
+        # Pretrained skill configs with per-dimension command ranges
+        # Format: 'low_high': ([low_per_dim], [high_per_dim])
+        skill_dict = {
+            'h1_walking': {
+                # command_dim=3: [lin_vel_x, lin_vel_y, ang_vel_yaw]
+                'experiment_name': 'h1_walking',
+                'load_run': '0000_best',
+                'checkpoint': -1,
+                'low_high': (
+                    [-1.0, -1.0, -1.0],  # [vel_x_min, vel_y_min, ang_vel_min]
+                    [1.0, 1.0, 1.0]       # [vel_x_max, vel_y_max, ang_vel_max] (2.0 not learned)
+                )
+            },
+            'h1_reaching': {
+                # command_dim=14: [l_wrist_xyz(3), l_wrist_quat(4), r_wrist_xyz(3), r_wrist_quat(4)]
+                'experiment_name': 'h1_reaching',
+                'load_run': '0000_best',
+                'checkpoint': -1,
+                'low_high': (
+                    [-0.10, -0.10, -0.25, -1, -1, -1, -1, -0.10, -0.25, -0.25, -1, -1, -1, -1],
+                    [0.25, 0.25, 0.25, 1, 1, 1, 1, 0.25, 0.10, 0.25, 1, 1, 1, 1]
+                )
+            },
+            'h1_squatting': {
+                # command_dim=1: [root_height]
+                'experiment_name': 'h1_squatting',
+                'load_run': '0000_best',
+                'checkpoint': -1,
+                'low_high': (
+                    [0.2],   # min height
+                    [1.1]    # max height
+                )
+            },
+            'h1_stepping': {
+                # command_dim=4: [l_foot_x, l_foot_y, r_foot_x, r_foot_y]
+                'experiment_name': 'h1_stepping',
+                'load_run': '0000_best',
+                'checkpoint': -1,
+                'low_high': (
+                    [-0.25, -0.25, -0.25, -0.25],
+                    [0.25, 0.25, 0.25, 0.25]
+                )
+            },
+        }
+        
     class algorithm:
+        # Standard PPO parameters (no complex curriculum needed with pretrained skills)
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.001  # Author's value (was 0.01)
-        num_learning_epochs = 2  # Author's value (was 5)
+        entropy_coef = 0.01  # Standard entropy
+        num_learning_epochs = 5
         num_mini_batches = 4
-        learning_rate = 1e-5  # Author's value for HRL tasks
-        schedule = 'fixed'  # IMPORTANT: disable adaptive to prevent LR explosion
-        gamma = 0.994  # Author's value (was 0.99)
-        lam = 0.9  # Author's value (was 0.95)
-        desired_kl = 0.01  # Not used with fixed schedule
+        learning_rate = 1e-4
+        schedule = 'adaptive'
+        gamma = 0.99
+        lam = 0.95
+        desired_kl = 0.01
         max_grad_norm = 1.0
         
+        # Curriculum parameters (kept for compatibility but less critical)
+        c_ent_skill = 0.01
+        stage1_end = 20000
+        total_iterations = 100000
+        K_start = 10
+        K_end = 5
+        epsilon_start = 0.18
+        epsilon_end = 0.0
+        tau_start = 2.0
+        tau_end = 1.0
+        c_ent_skill_start = 0.02
+        c_ent_skill_end = 0.005
+        lr_cmd_ratio_stage1 = 0.2
+        lr_cmd_ratio_stage2 = 1.0
+        
     class runner:
-        policy_class_name = 'ActorCritic'
-        algorithm_class_name = 'PPO'
-        num_steps_per_env = 60  # Author's value (was 24)
+        policy_class_name = 'ActorCriticHRL'  # HRL policy
+        algorithm_class_name = 'PPO_HRL'      # HRL algorithm
+        num_steps_per_env = 60
         max_iterations = 100000
         save_interval = 1000
         experiment_name = 'h1_hrl'
@@ -423,8 +491,20 @@ class H1HRLEnv(LeggedRobot):
             [self.critic_history[i] for i in range(self.cfg.env.c_frame_stack)], dim=1)
     
     def compute_reward(self):
-        """Compute task-specific rewards using ORIGINAL formulas from single-task envs"""
+        """Compute task-specific rewards using ORIGINAL formulas from single-task envs
+        
+        Also computes per-task metrics for logging:
+        - reach: task_reach_wrist_error
+        - button: task_button_wrist_error, task_button_arm_error
+        - cabinet: task_cabinet_wrist_error, task_cabinet_door_error
+        - ball: task_ball_torso_error, task_ball_goal_error
+        - box/transfer/lift/carry: task_X_box_error, task_X_wrist_error
+        """
         self.rew_buf[:] = 0.0
+        
+        # Initialize metrics storage for this step
+        if not hasattr(self, 'task_metrics'):
+            self.task_metrics = {}
         
         for task_id in range(8):
             mask = (self.task_ids == task_id)
@@ -432,21 +512,26 @@ class H1HRLEnv(LeggedRobot):
                 continue
                 
             if task_id == 0:  # Reach
-                task_rew = self._reward_reach(mask)
+                task_rew, metrics = self._reward_reach_with_metrics(mask)
             elif task_id == 1:  # Button
-                task_rew = self._reward_button(mask)
+                task_rew, metrics = self._reward_button_with_metrics(mask)
             elif task_id == 2:  # Cabinet
-                task_rew = self._reward_cabinet(mask)
+                task_rew, metrics = self._reward_cabinet_with_metrics(mask)
             elif task_id == 3:  # Ball
-                task_rew = self._reward_ball(mask)
+                task_rew, metrics = self._reward_ball_with_metrics(mask)
             else:  # Box tasks (4-7)
-                task_rew = self._reward_box_task(mask, task_id)
+                task_rew, metrics = self._reward_box_task_with_metrics(mask, task_id)
             
             self.rew_buf[mask] = task_rew
             
+            # Store metrics for this task
+            task_name = self.task_names[task_id]
+            for metric_name, value in metrics.items():
+                self.task_metrics[f'task_{task_name}_{metric_name}'] = value
+            
             # Track per-task rewards
-            self.task_episode_rewards[self.task_names[task_id]][mask] += task_rew
-            self.task_episode_lengths[self.task_names[task_id]][mask] += 1
+            self.task_episode_rewards[task_name][mask] += task_rew
+            self.task_episode_lengths[task_name][mask] += 1
         
         # Store reward components for logging
         for task_id in range(8):
@@ -456,11 +541,16 @@ class H1HRLEnv(LeggedRobot):
                 self.task_reward_components[task_name]['total'] = self.rew_buf[mask].mean().item()
     
     def _reward_reach(self, mask):
+        """Reach reward: wrist position to target (without metrics)"""
+        rew, _ = self._reward_reach_with_metrics(mask)
+        return rew
+    
+    def _reward_reach_with_metrics(self, mask):
         """Reach reward: wrist position to target
         
         Original: scale=5, decay=-4, formula: exp(-4 * error)
-        BALANCED: scale down by 0.003 (reach ~0.03 -> ~10 with factor 333)
-        Returns reward ONLY for masked envs (shape matches mask.sum())
+        BALANCED: scale to match ~10 range like other tasks
+        Returns: (reward, metrics_dict)
         """
         # Get wrist positions (2 wrists × 3 dimensions = 6)
         wrist_pos = self.rigid_state[mask][:, self.wrist_indices, :3]  # [N_masked, 2, 3]
@@ -470,14 +560,25 @@ class H1HRLEnv(LeggedRobot):
         # Mean absolute error - ORIGINAL uses decay=-4
         error = torch.mean(torch.abs(wrist_pos - target), dim=-1)  # [N_masked]
         raw_reward = 5.0 * torch.exp(-4.0 * error)  # scale=5, decay=-4 (ORIGINAL)
-        return raw_reward * 333.0  # BALANCE: 0.03 * 333 = ~10
+        
+        # Metrics - only errors, not rewards (avoid duplication with step_reward)
+        metrics = {
+            'wrist_error': error.mean().item(),
+        }
+        
+        return raw_reward * 120.0, metrics  # EASY: 150 * 0.8
     
     def _reward_button(self, mask):
+        """Button press reward (without metrics)"""
+        rew, _ = self._reward_button_with_metrics(mask)
+        return rew
+    
+    def _reward_button_with_metrics(self, mask):
         """Button press reward: left wrist to button + right arm default
         
         Original: wrist_button_distance=5, right_arm_default=0.5, decay=-4
         BALANCED: scale down by 0.357 (button ~28 -> ~10)
-        Returns reward ONLY for masked envs
+        Returns: (reward, metrics_dict)
         """
         # Left wrist to button (scale=5, decay=-4)
         left_wrist_pos = self.rigid_state[mask][:, self.wrist_indices[0], :3]  # [N_masked, 3]
@@ -493,15 +594,27 @@ class H1HRLEnv(LeggedRobot):
         rew_arm = 0.5 * torch.exp(-4.0 * arm_error)  # scale=0.5, decay=-4
         
         raw_reward = rew_wrist + rew_arm
-        return raw_reward * 0.357  # BALANCE: 28 * 0.357 = ~10
+        
+        # Metrics - only errors, not rewards
+        metrics = {
+            'wrist_error': wrist_error.mean().item(),
+            'arm_error': arm_error.mean().item(),
+        }
+        
+        return raw_reward * 0.167, metrics  # EASY: ~4.1 target
     
     def _reward_cabinet(self, mask):
+        """Cabinet task reward (without metrics)"""
+        rew, _ = self._reward_cabinet_with_metrics(mask)
+        return rew
+    
+    def _reward_cabinet_with_metrics(self, mask):
         """Cabinet task reward: both wrists to handle + door angle
         
         Original: wrist_arti_obj_distance=5, arti_obj_dof=5, decay=-4
         BALANCED: scale up by 1.82 (cabinet ~5.5 -> ~10)
         Uses BOTH wrists (2×3=6 dims) like original
-        Returns reward ONLY for masked envs
+        Returns: (reward, metrics_dict)
         """
         # Both wrists to door handle (scale=5, decay=-4)
         wrist_pos = self.rigid_state[mask][:, self.wrist_indices, :3]  # [N_masked, 2, 3]
@@ -516,15 +629,27 @@ class H1HRLEnv(LeggedRobot):
         rew_door = 5.0 * torch.exp(-4.0 * angle_error)  # scale=5, decay=-4
         
         raw_reward = rew_wrist + rew_door
-        return raw_reward * 1.82  # BALANCE: 5.5 * 1.82 = ~10
+        
+        # Metrics - only errors, not rewards
+        metrics = {
+            'wrist_error': wrist_error.mean().item(),
+            'door_error': angle_error.mean().item(),
+        }
+        
+        return raw_reward * 0.728, metrics  # EASY: 0.91 * 0.8
     
     def _reward_ball(self, mask):
+        """Ball kick reward (without metrics)"""
+        rew, _ = self._reward_ball_with_metrics(mask)
+        return rew
+    
+    def _reward_ball_with_metrics(self, mask):
         """Ball kick reward: torso to ball + ball to goal
         
         Original: torso_pos=1 (decay=-4), ball_pos=5 (decay=-1)
         BALANCED: scale down by 0.182 (ball ~55 -> ~10)
         NOTE: torso reward uses ORIGINAL ball position (where ball started)
-        Returns reward ONLY for masked envs
+        Returns: (reward, metrics_dict)
         """
         # Torso to ORIGINAL ball position (xy only, scale=1, decay=-4)
         torso_pos = self.rigid_state[mask][:, self.torso_indices[0], :2]  # [N_masked, 2]
@@ -540,9 +665,21 @@ class H1HRLEnv(LeggedRobot):
         rew_ball = 5.0 * torch.exp(-1.0 * ball_error)  # scale=5, decay=-1 (ORIGINAL)
         
         raw_reward = rew_torso + rew_ball
-        return raw_reward * 0.182  # BALANCE: 55 * 0.182 = ~10
+        
+        # Metrics - only errors, not rewards
+        metrics = {
+            'torso_error': torso_error.mean().item(),
+            'goal_error': ball_error.mean().item(),
+        }
+        
+        return raw_reward * 0.091, metrics  # MEDIUM: 0.091 * 1.0
     
     def _reward_box_task(self, mask, task_id):
+        """Box manipulation reward (without metrics)"""
+        rew, _ = self._reward_box_task_with_metrics(mask, task_id)
+        return rew
+    
+    def _reward_box_task_with_metrics(self, mask, task_id):
         """Box manipulation reward: box position to target + wrist proximity
         
         Original scales:
@@ -558,7 +695,7 @@ class H1HRLEnv(LeggedRobot):
         - lift: ~105 * 0.095 = ~10
         - carry: ~85 * 0.118 = ~10
         
-        Returns reward ONLY for masked envs (shape matches mask.sum())
+        Returns: (reward, metrics_dict)
         """
         box_pos = self.box_pos[mask]        # [N_masked, 3]
         target = self.box_target[mask]      # [N_masked, 3]
@@ -583,14 +720,21 @@ class H1HRLEnv(LeggedRobot):
         
         raw_reward = rew_box + rew_grasp
         
-        # BALANCE factors per task_id
+        # BALANCE factors per task_id with curriculum (Easy×0.8, Medium×1.0, Hard×1.3)
         balance_factors = {
-            4: 0.122,  # box: 82 * 0.122 = ~10
-            5: 0.125,  # transfer: 80 * 0.125 = ~10
-            6: 0.095,  # lift: 105 * 0.095 = ~10
-            7: 0.118,  # carry: 85 * 0.118 = ~10
+            4: 0.061,   # box (MEDIUM): 0.061 * 1.0 = ~4.9
+            5: 0.08125, # transfer (HARD): 0.0625 * 1.3 = ~6.5
+            6: 0.0475,  # lift (MEDIUM): 0.0475 * 1.0 = ~5
+            7: 0.0767,  # carry (HARD): 0.059 * 1.3 = ~6.5
         }
-        return raw_reward * balance_factors[task_id]
+        
+        # Metrics - only errors, not rewards
+        metrics = {
+            'box_error': box_error.mean().item(),
+            'wrist_error': wrist_error.mean().item(),
+        }
+        
+        return raw_reward * balance_factors[task_id], metrics
     
     def reset_idx(self, env_ids):
         """Reset specified environments with per-task stats logging"""
@@ -630,6 +774,7 @@ class H1HRLEnv(LeggedRobot):
         """Get task statistics for logging (called by train_hrl.py)
         
         Returns dict with keys like 'episode_reward/reach', 'step_reward/reach', etc.
+        Also includes per-task metrics with prefix 'task_<taskname>_<metric>'
         """
         stats = {}
         
@@ -643,6 +788,12 @@ class H1HRLEnv(LeggedRobot):
                 stats[f'step_reward/{name}'] = self.task_reward_components[name].get('total', 0.0)
             else:
                 stats[f'step_reward/{name}'] = 0.0
+        
+        # Per-task metrics (e.g., TaskMetric/reach_wrist_error, TaskMetric/ball_goal_error)
+        if hasattr(self, 'task_metrics'):
+            for key, value in self.task_metrics.items():
+                # Add TaskMetric/ prefix for separate wandb section
+                stats[f'TaskMetric/{key}'] = value
         
         # Raw data for advanced logging
         stats['rewards'] = self.task_avg_rewards.copy()

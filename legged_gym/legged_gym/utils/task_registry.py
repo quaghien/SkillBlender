@@ -35,7 +35,7 @@ import torch
 import numpy as np
 
 from rsl_rl.env import VecEnv
-from rsl_rl.runners import OnPolicyRunner
+from rsl_rl.runners import OnPolicyRunner, OnPolicyRunnerHRL
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed, parse_sim_params
@@ -46,19 +46,37 @@ from .logger import log_files
 def retrieve_cfgs(load_run, experiment_name):
     from runpy import run_path
     exp_path = f'./logs/{experiment_name}/{load_run}/'
+    
+    if not os.path.exists(exp_path):
+        raise FileNotFoundError(f"Experiment path not found: {exp_path}")
+    
     exp_files = os.listdir(exp_path)
+    cfg_path = None
+    
     for f in exp_files:
         if f.endswith("_config.py"):
             cfg_path = os.path.join(exp_path, f)
             cfgs = run_path(cfg_path)
             break
+    
+    if cfg_path is None:
+        raise FileNotFoundError(f"No *_config.py file found in {exp_path}. Available files: {exp_files}")
+    
     print('Loaded config from:', cfg_path)
+    
+    env_cfg = None
+    train_cfg = None
+    
     for key in cfgs.keys():
         if 'Cfg' in key:
             if 'PPO' in key:
                 train_cfg = cfgs[key]
             else:
                 env_cfg = cfgs[key]
+    
+    if env_cfg is None or train_cfg is None:
+        raise ValueError(f"Could not find Cfg classes in {cfg_path}. Keys found: {list(cfgs.keys())}")
+    
     return env_cfg, train_cfg
 
 class TaskRegistry():

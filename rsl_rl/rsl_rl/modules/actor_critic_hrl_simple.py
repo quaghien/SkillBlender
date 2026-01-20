@@ -71,8 +71,11 @@ class CommandHead(nn.Module):
     """Command generator - outputs mean/std for ALL dims, but only relevant slice is used"""
     
     # Clamp log_std to prevent extreme values
-    LOG_STD_MIN = -5.0  # std >= 0.0067
-    LOG_STD_MAX = 2.0   # std <= 7.39
+    # FIXED: Reduced LOG_STD_MAX to match author's init_noise_std=1.0
+    # Original: 2.0 -> std up to 7.39 -> entropy ~70+
+    # Fixed: 0.0 -> std up to 1.0 -> entropy ~27 (matching author)
+    LOG_STD_MIN = -2.0  # std >= 0.135 (not too small to allow exploration)
+    LOG_STD_MAX = 0.0   # std <= 1.0 (matching author's init_noise_std)
     
     def __init__(self, feature_dim=128, command_dim=14):
         super().__init__()
@@ -91,15 +94,16 @@ class ResidualHead(nn.Module):
     """Motor correction - init near-zero"""
     
     # Clamp log_std for stable training
-    LOG_STD_MIN = -5.0  # std >= 0.0067
-    LOG_STD_MAX = 0.0   # std <= 1.0 (residual should be small)
+    # FIXED: Use smaller std for residual since it should be small correction
+    LOG_STD_MIN = -3.0  # std >= 0.05
+    LOG_STD_MAX = -1.0  # std <= 0.37 (residual should be small)
     
     def __init__(self, feature_dim=128, action_dim=19):
         super().__init__()
         self.fc_mean = nn.Linear(feature_dim, action_dim)
         self.fc_log_std = nn.Linear(feature_dim, action_dim)
         
-        # Init near zero
+        # Init near zero with small std
         nn.init.uniform_(self.fc_mean.weight, -1e-4, 1e-4)
         nn.init.zeros_(self.fc_mean.bias)
         nn.init.uniform_(self.fc_log_std.weight, -1e-4, 1e-4)
@@ -570,6 +574,30 @@ class ActorCriticHRLSimple(nn.Module):
             action, _, info = self.forward(obs)
             self.last_info = info
         return action
+    
+    def act_inference(self, obs):
+        """Standard inference - returns action mean"""
+        self.training_mode = False
+        with torch.no_grad():
+            action, _, info = self.forward(obs)
+        return action
+    
+    def act_inference_hrl(self, obs):
+        """
+        HRL inference - returns dict with actions_mean and additional info.
+        Compatible with original ActorCriticHierarchical interface.
+        """
+        self.training_mode = False
+        with torch.no_grad():
+            action, _, info = self.forward(obs)
+        
+        # Return format compatible with original play.py
+        return {
+            'actions_mean': action,
+            'skill_exec': info.get('skill_exec', None),
+            'gating_probs': info.get('gating_probs', None),
+            'command_full': info.get('command_full', None),
+        }
     
     def get_value(self, obs):
         return self.critic(obs).squeeze(-1)

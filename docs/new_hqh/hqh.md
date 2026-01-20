@@ -16,9 +16,29 @@ python legged_gym/scripts/train.py --task h1_task_button --run_name h1_task_butt
 
 python legged_gym/scripts/train.py --task h1_task_carry --run_name h1_task_carry --headless --sim_device cuda:0 --rl_device cuda:0
 
+python legged_gym/scripts/play.py --task h1_reaching  --experiment_name h1_reaching  --load_run 0000_best --checkpoint -1 --sim_device cuda:0 --rl_device cuda:0 
+
 python legged_gym/scripts/play.py --task h1_walking  --experiment_name h1_walking  --load_run 0000_best --checkpoint -1 --sim_device cuda:0 --rl_device cuda:0  --visualize
 
 python legged_gym/scripts/play.py --task h1_task_carry  --experiment_name h1_task_carry  --load_run 0000_best --checkpoint -1 --sim_device cuda:0 --rl_device cuda:0  --visualize
+
+# HRL Training & Play Commands
+# ============================
+
+# Train HRL (8 tasks: reach, button, cabinet, ball, box, transfer, lift, carry)
+python legged_gym/scripts/train_hrl.py --task h1_hrl --run_name hrl_v8.1 --num_envs 4096 --max_iterations 100000 --sim_device cuda:0 --rl_device cuda:0 --headless --wandb hrl_v8
+
+# Play HRL with GUI + video recording
+python legged_gym/scripts/play_hrl.py --task h1_hrl --experiment_name h1_hrl --load_run v3 --checkpoint -1 --sim_device cuda:0 --rl_device cuda:0 --visualize
+
+# Play HRL headless mode + video recording (no GUI, for remote server)
+python legged_gym/scripts/play_hrl.py --task h1_hrl --experiment_name h1_hrl --load_run v3 --checkpoint 1000 --sim_device cuda:0 --rl_device cuda:0 --headless --record
+
+# Play HRL with specific checkpoint (e.g., model_11755.pt)
+python legged_gym/scripts/play_hrl.py --task h1_hrl --experiment_name h1_hrl --load_run hrl_v8.1 --checkpoint 11755 --sim_device cuda:0 --rl_device cuda:0 --visualize
+
+# Play HRL headless + no recording (fast, just for testing)
+python legged_gym/scripts/play_hrl.py --task h1_hrl --experiment_name h1_hrl --load_run hrl_v8.1 --checkpoint -1 --sim_device cuda:0 --rl_device cuda:0 --headless
 
 h1_task_ball
 

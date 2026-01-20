@@ -3,3 +3,4 @@ from .actor_critic_hierarchical import ActorCriticHierarchical
 from .actor_critic_vision import ActorCriticVision
 from .actor_critic_hierarchical_vision import ActorCriticHierarchicalVision
 from .actor_critic_hrl_simple import ActorCriticHRLSimple
+from .actor_critic_hrl import ActorCriticHRL
