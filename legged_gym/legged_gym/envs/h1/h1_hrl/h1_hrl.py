@@ -679,6 +679,24 @@ class H1HRLEnv(LeggedRobot):
         if not hasattr(self, 'task_metrics'):
             self.task_metrics = {}
         
+        # IMPORTANT: Init ALL 8 tasks metrics with default values (for WandB)
+        # This ensures all metrics exist from iteration 0
+        default_metrics = {
+            'reach': ['wrist_error', 'progress'],
+            'button': ['wrist_error', 'arm_error', 'progress'],
+            'cabinet': ['wrist_error', 'door_error', 'progress'],
+            'ball': ['torso_error', 'goal_error', 'progress'],
+            'box': ['box_error', 'wrist_error', 'progress'],
+            'lift': ['box_error', 'wrist_error', 'progress'],
+            'transfer': ['box_error', 'wrist_error', 'progress'],
+            'carry': ['box_error', 'wrist_error', 'progress'],
+        }
+        for task_name, metric_names in default_metrics.items():
+            for metric_name in metric_names:
+                key = f'task_{task_name}_{metric_name}'
+                if key not in self.task_metrics:
+                    self.task_metrics[key] = 0.0  # Default value
+        
         # Initialize previous errors for progress tracking (first call)
         if not hasattr(self, 'prev_errors'):
             self.prev_errors = {
