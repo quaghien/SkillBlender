@@ -19,7 +19,7 @@ class H1HRLCfg(LeggedRobotCfg):
     """Configuration for 8-task HRL meta-environment"""
     
     class env(LeggedRobotCfg.env):
-        num_envs = 4096
+        num_envs = 16384  # 4x reduced for faster policy updates, 2048 per task
         num_actions = 19  # H1 DOFs
         frame_stack = 1
         c_frame_stack = 3
@@ -64,10 +64,27 @@ class H1HRLCfg(LeggedRobotCfg):
         
     class control(LeggedRobotCfg.control):
         control_type = 'P'
-        stiffness = {'joint': 150.0}
-        damping = {'joint': 5.0}
+        # PD Drive parameters (matching original single-task configs)
+        stiffness = {'hip_yaw': 200,
+                     'hip_roll': 200,
+                     'hip_pitch': 200,
+                     'knee': 300,
+                     'ankle': 40,
+                     'torso': 300,
+                     'shoulder': 100,
+                     'elbow': 100,
+                     }  # [N*m/rad]
+        damping = {'hip_yaw': 5,
+                   'hip_roll': 5,
+                   'hip_pitch': 5,
+                   'knee': 6,
+                   'ankle': 2,
+                   'torso': 6,
+                   'shoulder': 2,
+                   'elbow': 2,
+                   }  # [N*m*s/rad]
         action_scale = 0.25
-        decimation = 20  # 50 Hz control
+        decimation = 10  # 100 Hz control (MUST match pretrained skills!)
         
     class asset(LeggedRobotCfg.asset):
         file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/h1/urdf/h1_wrist.urdf'
@@ -78,7 +95,7 @@ class H1HRLCfg(LeggedRobotCfg):
         wrist_name = 'wrist'  # Note: wrist links have no collision, use elbow as proxy
         torso_name = 'torso'
         terminate_after_contacts_on = ['pelvis', 'torso', 'shoulder', 'elbow']
-        penalize_contacts_on = ['hip', 'knee']
+        penalize_contacts_on = ['hip', 'knee', 'pelvis', 'torso', 'shoulder', 'elbow']  # Match original
         self_collisions = 0
         flip_visual_attachments = False
         replace_cylinder_with_capsule = False
@@ -129,9 +146,11 @@ class H1HRLCfgPPO(LeggedRobotCfgPPO):
     
     class policy:
         init_noise_std = 0.5
-        # High-level network architecture
-        actor_hidden_dims = [256, 256, 256]
-        critic_hidden_dims = [512, 256, 128]
+        # High-level network architecture - LARGER for multi-task complexity
+        # Input: 105 (state + goal + mask + task_id)
+        # Output: 26 (4 skill logits + 22 command dims)
+        actor_hidden_dims = [512, 256, 128]  # ~400k params, same as original single-task
+        critic_hidden_dims = [768, 256, 128]  # Larger for 303D privileged obs
         activation = 'elu'
         
         # Low-level skill parameters
@@ -139,19 +158,19 @@ class H1HRLCfgPPO(LeggedRobotCfgPPO):
         frame_stack = 1
         command_dim = 3  # Original env command dim (will be replaced per skill)
         num_dofs = 19
+        hold_steps = 5  # Hold skill for 5 steps (reduces jitter)
         
         # Pretrained skill configs with per-dimension command ranges
         # Format: 'low_high': ([low_per_dim], [high_per_dim])
         skill_dict = {
             'h1_walking': {
                 # command_dim=3: [lin_vel_x, lin_vel_y, ang_vel_yaw]
+                # Output clamp to [-1, 1] then scale by [2.0, 2.0, 1.0]
+                # Final range: vel_x ∈ [-2, 2], vel_y ∈ [-2, 2], yaw ∈ [-1, 1]
                 'experiment_name': 'h1_walking',
                 'load_run': '0000_best',
                 'checkpoint': -1,
-                'low_high': (
-                    [-1.0, -1.0, -1.0],  # [vel_x_min, vel_y_min, ang_vel_min]
-                    [1.0, 1.0, 1.0]       # [vel_x_max, vel_y_max, ang_vel_max] (2.0 not learned)
-                )
+                'low_high': (-1.0, 1.0)  # Clamp before scale
             },
             'h1_reaching': {
                 # command_dim=14: [l_wrist_xyz(3), l_wrist_quat(4), r_wrist_xyz(3), r_wrist_quat(4)]
@@ -186,13 +205,13 @@ class H1HRLCfgPPO(LeggedRobotCfgPPO):
         }
         
     class algorithm:
-        # Standard PPO parameters (no complex curriculum needed with pretrained skills)
+        # Standard PPO parameters
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.01  # Standard entropy
+        entropy_coef = 0.01  # Action entropy
         num_learning_epochs = 5
-        num_mini_batches = 4
+        num_mini_batches = 64
         learning_rate = 1e-4
         schedule = 'adaptive'
         gamma = 0.99
@@ -200,27 +219,22 @@ class H1HRLCfgPPO(LeggedRobotCfgPPO):
         desired_kl = 0.01
         max_grad_norm = 1.0
         
-        # Curriculum parameters (kept for compatibility but less critical)
-        c_ent_skill = 0.01
-        stage1_end = 20000
-        total_iterations = 100000
+        # Simple curriculum (linear decay, no stages)
+        c_ent_skill = 0.05    # Skill entropy for diversity (constant)
+        total_iterations = 8000  # 8 tasks × 1000 iters each
         K_start = 10
         K_end = 5
         epsilon_start = 0.18
         epsilon_end = 0.0
         tau_start = 2.0
         tau_end = 1.0
-        c_ent_skill_start = 0.02
-        c_ent_skill_end = 0.005
-        lr_cmd_ratio_stage1 = 0.2
-        lr_cmd_ratio_stage2 = 1.0
         
     class runner:
         policy_class_name = 'ActorCriticHRL'  # HRL policy
         algorithm_class_name = 'PPO_HRL'      # HRL algorithm
         num_steps_per_env = 60
-        max_iterations = 100000
-        save_interval = 1000
+        max_iterations = 8000  # 8 tasks × 1000 iters each
+        save_interval = 500
         experiment_name = 'h1_hrl'
         run_name = ''
         resume = False
@@ -261,7 +275,11 @@ class H1HRLEnv(LeggedRobot):
     cfg: H1HRLCfg
     
     # Task names for logging
-    task_names = ['reach', 'button', 'cabinet', 'ball', 'box', 'transfer', 'lift', 'carry']
+    # Task order: Easy → Medium → Hard (from SkillBlender paper)
+    # Easy:   reach, button, cabinet
+    # Medium: ball, box, lift  
+    # Hard:   transfer, carry
+    task_names = ['reach', 'button', 'cabinet', 'ball', 'box', 'lift', 'transfer', 'carry']
     
     def __init__(self, cfg: H1HRLCfg, sim_params, physics_engine, sim_device, headless):
         super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
@@ -270,8 +288,9 @@ class H1HRLEnv(LeggedRobot):
         # CRITICAL: Override num_obs for 8-task setup (State 69 + Goal 14 + Mask 14 + TaskID 8 = 105)
         self.num_obs = cfg.env.num_observations
         
-        # Task assignment per env (after super init so self.device exists)
-        self.task_ids = torch.randint(0, 8, (self.num_envs,), device=self.device)
+        # Task assignment per env - BALANCED SAMPLING
+        # Each task gets equal number of envs (num_envs / 8)
+        self.task_ids = self._init_balanced_tasks()
         
         # Goal storage
         self.goal_value = torch.zeros(self.num_envs, 14, device=self.device)
@@ -294,6 +313,7 @@ class H1HRLEnv(LeggedRobot):
         
         # Ball states (for ball task)
         self.ball_pos = torch.zeros(self.num_envs, 3, device=self.device)
+        self.ball_ori_pos = torch.zeros(self.num_envs, 3, device=self.device)  # ORIGINAL ball position (for torso reward)
         self.ball_target = torch.zeros(self.num_envs, 3, device=self.device)
         
         # Note: wrist_indices set in _create_envs()
@@ -338,17 +358,26 @@ class H1HRLEnv(LeggedRobot):
         """Create envs and setup body indices"""
         super()._create_envs()
         
-        # Get elbow indices (used as wrist proxy - wrist links have no collision/inertia in URDF)
+        # Get elbow indices
         elbow_names = [s for s in self.body_names if self.cfg.asset.elbow_name in s]
         self.elbow_indices = torch.zeros(len(elbow_names), dtype=torch.long, device=self.device)
         for i, name in enumerate(elbow_names):
             self.elbow_indices[i] = self.gym.find_actor_rigid_body_handle(
                 self.envs[0], self.actor_handles[0], name)
         
-        # Use elbow as wrist proxy (wrist links not in rigid_body_state due to no collision mesh)
-        # This matches the actual physical end of the arm that can be tracked
-        self.wrist_indices = self.elbow_indices
-        print(f"[HRL] Using elbow as wrist proxy. wrist_indices: {self.wrist_indices}")
+        # Get wrist indices - fallback to elbow if wrist not found
+        # (H1 URDF has wrist as fixed joints without collision, so they may not appear as rigid bodies)
+        wrist_names = [s for s in self.body_names if self.cfg.asset.wrist_name in s]
+        if len(wrist_names) > 0:
+            self.wrist_indices = torch.zeros(len(wrist_names), dtype=torch.long, device=self.device)
+            for i, name in enumerate(wrist_names):
+                self.wrist_indices[i] = self.gym.find_actor_rigid_body_handle(
+                    self.envs[0], self.actor_handles[0], name)
+            print(f"[HRL] Using REAL wrist indices: {self.wrist_indices}")
+        else:
+            # Fallback to elbow indices
+            self.wrist_indices = self.elbow_indices.clone()
+            print(f"[HRL] Wrist not found, using elbow indices as proxy: {self.wrist_indices}")
         
         # Get torso indices
         torso_names = [s for s in self.body_names if self.cfg.asset.torso_name in s]
@@ -357,97 +386,242 @@ class H1HRLEnv(LeggedRobot):
             self.torso_indices[i] = self.gym.find_actor_rigid_body_handle(
                 self.envs[0], self.actor_handles[0], name)
     
-    def _sample_goals(self, env_ids):
-        """Sample new goals for specified environments"""
+    def set_task_weights(self, weights):
+        """Set task sampling weights from curriculum.
+        
+        Called by runner each iteration to update task distribution.
+        Args:
+            weights: list of 8 weights (sum = 1.0)
+        """
+        self.task_weights = torch.tensor(weights, dtype=torch.float, device=self.device)
+        # Redistribute envs to match new weights
+        self._redistribute_tasks()
+    
+    def _redistribute_tasks(self):
+        """Redistribute all envs to match current task_weights."""
+        # Calculate target counts per task
+        target_counts = (self.task_weights * self.num_envs).long()
+        # Handle rounding errors by adding remainder to focus task
+        remainder = self.num_envs - target_counts.sum()
+        if remainder > 0:
+            focus_task = torch.argmax(self.task_weights)
+            target_counts[focus_task] += remainder
+        
+        # Build new task_ids tensor
+        new_task_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        start_idx = 0
+        for task_id in range(8):
+            count = target_counts[task_id].item()
+            if count > 0:
+                new_task_ids[start_idx:start_idx + count] = task_id
+                start_idx += count
+        
+        # Shuffle to avoid spatial correlation
+        perm = torch.randperm(self.num_envs, device=self.device)
+        new_task_ids = new_task_ids[perm]
+        
+        # Update task assignments
+        self.task_ids = new_task_ids
+        self.task_onehot.zero_()
+        for i in range(self.num_envs):
+            self.task_onehot[i, self.task_ids[i]] = 1
+        
+        # Log the new distribution
+        counts = [(self.task_ids == i).sum().item() for i in range(8)]
+        print(f"[HRL] Task redistribution: {counts} envs per task")
+    
+    def _init_balanced_tasks(self):
+        """Initialize tasks with balanced distribution across envs"""
+        # Default: equal distribution (will be updated by curriculum)
+        self.task_weights = torch.ones(8, dtype=torch.float, device=self.device) / 8
+        
+        task_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        envs_per_task = self.num_envs // 8
+        for task_id in range(8):
+            start_idx = task_id * envs_per_task
+            end_idx = start_idx + envs_per_task if task_id < 7 else self.num_envs
+            task_ids[start_idx:end_idx] = task_id
+        # Shuffle to avoid spatial correlation
+        perm = torch.randperm(self.num_envs, device=self.device)
+        task_ids = task_ids[perm]
+        print(f"[HRL] Balanced task init: {[(task_ids == i).sum().item() for i in range(8)]} envs per task")
+        return task_ids
+    
+    def _sample_balanced_tasks(self, env_ids):
+        """Sample tasks to MAINTAIN balanced distribution across all envs.
+        
+        Strategy: Assign tasks to prioritize under-represented tasks.
+        This prevents task collapse when some tasks have higher mortality.
+        """
         n = len(env_ids)
         
-        # Resample tasks
-        self.task_ids[env_ids] = torch.randint(0, 8, (n,), device=self.device)
+        # Get current task counts (excluding envs being reset)
+        remaining_mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        remaining_mask[env_ids] = False
+        current_counts = torch.zeros(8, device=self.device)
+        for task_id in range(8):
+            current_counts[task_id] = ((self.task_ids == task_id) & remaining_mask).sum()
         
-        # Reset buffers
+        # Target counts after reset
+        target_per_task = self.num_envs // 8
+        
+        # Calculate how many envs each task needs to reach target
+        deficit = target_per_task - current_counts
+        deficit = torch.clamp(deficit, min=0)  # Only consider under-represented tasks
+        
+        # Assign tasks proportionally to deficit
+        new_task_ids = torch.zeros(n, dtype=torch.long, device=self.device)
+        if deficit.sum() > 0:
+            # Weighted sampling based on deficit
+            weights = deficit / deficit.sum()
+            for i in range(n):
+                # Sample task weighted by how much it's under-represented
+                task_probs = weights.clone()
+                # Add small uniform probability to avoid complete starvation
+                task_probs = 0.9 * task_probs + 0.1 / 8
+                new_task_ids[i] = torch.multinomial(task_probs, 1).item()
+                # Update weights to reflect this assignment
+                deficit[new_task_ids[i]] -= 1
+                deficit = torch.clamp(deficit, min=0)
+                if deficit.sum() > 0:
+                    weights = deficit / deficit.sum()
+                else:
+                    weights = torch.ones(8, device=self.device) / 8
+        else:
+            # All tasks at or above target, random assignment
+            new_task_ids = torch.randint(0, 8, (n,), device=self.device)
+        
+        return new_task_ids
+    
+    def _sample_goals(self, env_ids):
+        """Sample new goals for specified environments.
+        
+        NOTE: Task assignment is FIXED at init. Here we only sample NEW GOALS
+        for the same task. This maintains balanced task distribution.
+        """
+        n = len(env_ids)
+        
+        # DO NOT resample tasks! Keep original task assignment.
+        # self.task_ids[env_ids] = self._sample_balanced_tasks(env_ids)  # REMOVED
+        
+        # Reset goal buffers only
         self.goal_value[env_ids] = 0
         self.goal_mask[env_ids] = 0
         self.task_onehot[env_ids] = 0
         
         for i, env_id in enumerate(env_ids):
-            task_id = self.task_ids[env_id].item()
+            task_id = self.task_ids[env_id].item()  # Keep original task!
             self.task_onehot[env_id, task_id] = 1
             
-            if task_id == 0:  # Reach: 6D wrist target (world coordinates)
-                # Sample reachable wrist positions (typical arm workspace)
-                # Left wrist: x=[0.2, 0.6], y=[0.1, 0.5], z=[0.7, 1.3]
-                # Right wrist: x=[0.2, 0.6], y=[-0.5, -0.1], z=[0.7, 1.3]
-                target = torch.zeros(6, device=self.device)
-                # Left wrist target
-                target[0] = 0.2 + torch.rand(1, device=self.device).item() * 0.4  # x: 0.2-0.6
-                target[1] = 0.1 + torch.rand(1, device=self.device).item() * 0.4  # y: 0.1-0.5
-                target[2] = 0.7 + torch.rand(1, device=self.device).item() * 0.6  # z: 0.7-1.3
-                # Right wrist target
-                target[3] = 0.2 + torch.rand(1, device=self.device).item() * 0.4  # x: 0.2-0.6
-                target[4] = -0.5 + torch.rand(1, device=self.device).item() * 0.4  # y: -0.5--0.1
-                target[5] = 0.7 + torch.rand(1, device=self.device).item() * 0.6  # z: 0.7-1.3
-                self.goal_value[env_id, :6] = target
+            # Get robot base position in world frame for coordinate conversion
+            # root_states: [num_envs, 13] = [pos(3), quat(4), lin_vel(3), ang_vel(3)]
+            robot_base_pos = self.root_states[env_id, :3]  # [x, y, z] in world frame
+            
+            if task_id == 0:  # Reach: 6D wrist target (WORLD coordinates)
+                # Sample reachable wrist positions in ROBOT FRAME, then convert to world
+                # Robot frame: x=forward, y=left, z=up (relative to robot base)
+                # Left wrist: x=[0.2, 0.6], y=[0.1, 0.5], z=[0.7, 1.3] (robot frame)
+                # Right wrist: x=[0.2, 0.6], y=[-0.5, -0.1], z=[0.7, 1.3] (robot frame)
+                target_local = torch.zeros(6, device=self.device)
+                # Left wrist target (robot frame)
+                target_local[0] = 0.2 + torch.rand(1, device=self.device).item() * 0.4  # x: 0.2-0.6
+                target_local[1] = 0.1 + torch.rand(1, device=self.device).item() * 0.4  # y: 0.1-0.5
+                target_local[2] = 0.7 + torch.rand(1, device=self.device).item() * 0.6  # z: 0.7-1.3
+                # Right wrist target (robot frame)
+                target_local[3] = 0.2 + torch.rand(1, device=self.device).item() * 0.4  # x: 0.2-0.6
+                target_local[4] = -0.5 + torch.rand(1, device=self.device).item() * 0.4  # y: -0.5--0.1
+                target_local[5] = 0.7 + torch.rand(1, device=self.device).item() * 0.6  # z: 0.7-1.3
+                
+                # Convert to world frame: add robot base position
+                target_world = target_local.clone()
+                target_world[0:3] += robot_base_pos  # Left wrist
+                target_world[3:6] += robot_base_pos  # Right wrist
+                
+                self.goal_value[env_id, :6] = target_world
                 self.goal_mask[env_id, :6] = 1
                 
-            elif task_id == 1:  # Button: 3D button position (reachable by left arm)
-                # Button in reachable workspace: x=[0.3, 0.6], y=[0.1, 0.4], z=[0.8, 1.2]
-                button_pos = torch.zeros(3, device=self.device)
-                button_pos[0] = 0.3 + torch.rand(1, device=self.device).item() * 0.3  # x: 0.3-0.6
-                button_pos[1] = 0.1 + torch.rand(1, device=self.device).item() * 0.3  # y: 0.1-0.4
-                button_pos[2] = 0.8 + torch.rand(1, device=self.device).item() * 0.4  # z: 0.8-1.2
-                self.button_pos[env_id] = button_pos
-                self.goal_value[env_id, :3] = button_pos
+            elif task_id == 1:  # Button: 3D button position (WORLD coordinates)
+                # Button in reachable workspace (robot frame): x=[0.3, 0.6], y=[0.1, 0.4], z=[0.8, 1.2]
+                button_local = torch.zeros(3, device=self.device)
+                button_local[0] = 0.3 + torch.rand(1, device=self.device).item() * 0.3  # x: 0.3-0.6
+                button_local[1] = 0.1 + torch.rand(1, device=self.device).item() * 0.3  # y: 0.1-0.4
+                button_local[2] = 0.8 + torch.rand(1, device=self.device).item() * 0.4  # z: 0.8-1.2
+                
+                # Convert to world frame
+                button_world = button_local + robot_base_pos
+                self.button_pos[env_id] = button_world
+                self.goal_value[env_id, :3] = button_world
                 self.goal_mask[env_id, :3] = 1
                 
             elif task_id == 2:  # Cabinet: close door (target angle = 0)
-                # Cabinet handle in reachable workspace: x=[0.4, 0.7], y=[0.0, 0.3], z=[0.8, 1.1]
+                # Cabinet handle in reachable workspace (robot frame): x=[0.4, 0.7], y=[0.0, 0.3], z=[0.8, 1.1]
                 self.door_angle[env_id] = 1.0  # Start open
                 self.door_target[env_id] = 0.0  # Target closed
-                # Store handle position for reward calculation
-                handle_x = 0.4 + torch.rand(1, device=self.device).item() * 0.3
-                handle_y = 0.0 + torch.rand(1, device=self.device).item() * 0.3
-                handle_z = 0.8 + torch.rand(1, device=self.device).item() * 0.3
-                self.goal_value[env_id, 0] = handle_x
-                self.goal_value[env_id, 1] = handle_y
-                self.goal_value[env_id, 2] = handle_z
+                
+                # Handle position in robot frame
+                handle_local = torch.zeros(3, device=self.device)
+                handle_local[0] = 0.4 + torch.rand(1, device=self.device).item() * 0.3
+                handle_local[1] = 0.0 + torch.rand(1, device=self.device).item() * 0.3
+                handle_local[2] = 0.8 + torch.rand(1, device=self.device).item() * 0.3
+                
+                # Convert to world frame
+                handle_world = handle_local + robot_base_pos
+                self.goal_value[env_id, 0] = handle_world[0]
+                self.goal_value[env_id, 1] = handle_world[1]
+                self.goal_value[env_id, 2] = handle_world[2]
                 self.goal_value[env_id, 3] = 0.0  # target door angle
                 self.goal_mask[env_id, :4] = 1
                 
             elif task_id == 3:  # Ball: kick ball to goal
-                ball_start = torch.tensor([0.8, 0, 0.2], device=self.device)
-                ball_start[1] += (torch.rand(1, device=self.device) * 0.6 - 0.3).item()  # y: -0.3 to 0.3
-                self.ball_pos[env_id] = ball_start
+                # Ball position relative to robot, then convert to world
+                ball_local = torch.tensor([0.8, 0, 0.2], device=self.device)
+                ball_local[1] += (torch.rand(1, device=self.device) * 0.6 - 0.3).item()  # y: -0.3 to 0.3
                 
-                goal_pos = torch.tensor([5.0, 0, 0.25], device=self.device)
-                goal_pos[1] += (torch.rand(1, device=self.device) * 4.0 - 2.0).item()  # y: -2 to 2
-                self.ball_target[env_id] = goal_pos
-                self.goal_value[env_id, :3] = goal_pos
+                ball_world = ball_local + robot_base_pos
+                self.ball_pos[env_id] = ball_world
+                self.ball_ori_pos[env_id] = ball_world.clone()  # Store ORIGINAL position for torso reward
+                
+                # Goal is further away (world coordinates)
+                goal_offset = torch.tensor([5.0, 0, 0.05], device=self.device)  # z=0.05 (on ground)
+                goal_offset[1] += (torch.rand(1, device=self.device) * 4.0 - 2.0).item()  # y: -2 to 2
+                goal_world = goal_offset + robot_base_pos
+                self.ball_target[env_id] = goal_world
+                self.goal_value[env_id, :3] = goal_world
                 self.goal_mask[env_id, :3] = 1
                 
             elif task_id in [4, 5, 6, 7]:  # Box/Transfer/Lift/Carry: 3D box target
-                target = torch.zeros(3, device=self.device)
-                target[0] = (torch.rand(1, device=self.device) * 1.5 - 0.5).item()  # x: -0.5 to 1.0
-                target[1] = (torch.rand(1, device=self.device) * 1.2 - 0.6).item()  # y: -0.6 to 0.6
-                target[2] = (0.4 + torch.rand(1, device=self.device) * 0.4).item()  # z: 0.4 to 0.8
+                # Box target in robot frame
+                target_local = torch.zeros(3, device=self.device)
+                target_local[0] = (torch.rand(1, device=self.device) * 1.5 - 0.5).item()  # x: -0.5 to 1.0
+                target_local[1] = (torch.rand(1, device=self.device) * 1.2 - 0.6).item()  # y: -0.6 to 0.6
+                target_local[2] = (0.4 + torch.rand(1, device=self.device) * 0.4).item()  # z: 0.4 to 0.8
                 
-                self.goal_value[env_id, :3] = target
+                # Convert to world frame
+                target_world = target_local + robot_base_pos
+                self.goal_value[env_id, :3] = target_world
                 self.goal_mask[env_id, :3] = 1
-                self.box_target[env_id] = target
+                self.box_target[env_id] = target_world
                 
-                # Init box position
-                self.box_pos[env_id] = torch.tensor([0.7, 0, 0.3], device=self.device)
+                # Init box position near robot
+                box_local = torch.tensor([0.7, 0, 0.3], device=self.device)
+                box_world = box_local + robot_base_pos
+                self.box_pos[env_id] = box_world
     
     def compute_observations(self):
         """
         Observation: State (69) + Goal (14) + Mask (14) + TaskID (8) = 105
         Privileged Obs: 303 = 3 frames × 101 dims per frame
+        
+        NOTE: HRL uses a unified observation format. The high-level policy
+        learns to interpret state + goal_value to generate skill commands.
         """
         # State (69 dims) - matches h1_walking structure
+        # Command scale: [lin_vel=2.0, lin_vel=2.0, ang_vel=1.0] (NOT 0.25 for yaw!)
         state = torch.cat([
             self.base_lin_vel * 2.0,                    # 3
             self.base_ang_vel * 0.25,                   # 3
             self.projected_gravity,                      # 3
-            self.commands[:, :3] * torch.tensor([2.0, 2.0, 0.25], device=self.device),  # 3
+            self.commands[:, :3] * torch.tensor([2.0, 2.0, 1.0], device=self.device),  # 3 (FIXED: yaw scale = 1.0)
             (self.dof_pos - self.default_dof_pos) * 1.0,  # 19
             self.dof_vel * 0.05,                         # 19
             self.actions,                                # 19
@@ -464,7 +638,7 @@ class H1HRLEnv(LeggedRobot):
         # Privileged observation (101 dims per frame, matching single_num_privileged_obs)
         # Structure: commands(5) + dof_pos(19) + dof_vel(19) + actions(19) + diff(19) + base(9) + extras(11) = 101
         cmd_5d = torch.zeros(self.num_envs, 5, device=self.device)
-        cmd_5d[:, :3] = self.commands[:, :3] * torch.tensor([2.0, 2.0, 0.25], device=self.device)
+        cmd_5d[:, :3] = self.commands[:, :3] * torch.tensor([2.0, 2.0, 1.0], device=self.device)  # FIXED: yaw scale = 1.0
         
         priv_single = torch.cat([
             cmd_5d,                                      # 5 (command_input)
@@ -491,14 +665,16 @@ class H1HRLEnv(LeggedRobot):
             [self.critic_history[i] for i in range(self.cfg.env.c_frame_stack)], dim=1)
     
     def compute_reward(self):
-        """Compute task-specific rewards using ORIGINAL formulas from single-task envs
+        """Compute task-specific rewards using ORIGINAL formulas + SHAPED REWARDS
         
-        Also computes per-task metrics for logging:
-        - reach: task_reach_wrist_error
-        - button: task_button_wrist_error, task_button_arm_error
-        - cabinet: task_cabinet_wrist_error, task_cabinet_door_error
-        - ball: task_ball_torso_error, task_ball_goal_error
-        - box/transfer/lift/carry: task_X_box_error, task_X_wrist_error
+        Structure for each task:
+        1. BASE REWARD: Original exponential reward (matches single-task training)
+        2. PROGRESS BONUS: Reward for reducing error vs previous step
+        3. SUCCESS BONUS: Extra reward when error below threshold
+        
+        Metrics logged:
+        - task_<name>_<error>: Raw error values for monitoring
+        - task_<name>_progress: Progress (delta error) - positive = improving
         """
         self.rew_buf[:] = 0.0
         
@@ -506,31 +682,68 @@ class H1HRLEnv(LeggedRobot):
         if not hasattr(self, 'task_metrics'):
             self.task_metrics = {}
         
+        # Initialize previous errors for progress tracking (first call)
+        if not hasattr(self, 'prev_errors'):
+            self.prev_errors = {
+                'reach_wrist': torch.zeros(self.num_envs, device=self.device),
+                'button_wrist': torch.zeros(self.num_envs, device=self.device),
+                'cabinet_wrist': torch.zeros(self.num_envs, device=self.device),
+                'cabinet_door': torch.zeros(self.num_envs, device=self.device),
+                'ball_torso': torch.zeros(self.num_envs, device=self.device),
+                'ball_goal': torch.zeros(self.num_envs, device=self.device),
+                'box_box': torch.zeros(self.num_envs, device=self.device),
+                'box_wrist': torch.zeros(self.num_envs, device=self.device),
+            }
+        
+        # Reward shaping config (can be tuned)
+        cfg_shaping = {
+            'progress_scale': 1.0,      # Scale for progress bonus
+        }
+        
+        # Task difficulty scales - Task khó cần reward cao hơn để học tốt
+        # Easy: reach, button, cabinet → x1.0 (baseline)
+        # Medium: ball, box, lift → x1.2-1.5
+        # Hard: transfer, carry → x1.5-2.0
+        TASK_DIFFICULTY_SCALES = {
+            0: 1.0,   # reach (Easy)
+            1: 1.0,   # button (Easy)
+            2: 0.6,   # cabinet (Easy - giảm vì base=10 quá cao)
+            3: 1.5,   # ball (Medium)
+            4: 1.0,   # box (Medium - base=10 đã cao)
+            5: 2.0,   # transfer (Hard - tăng vì base=6 quá thấp)
+            6: 1.0,   # lift (Medium - base=10 đã cao)
+            7: 1.3,   # carry (Hard)
+        }
+        
         for task_id in range(8):
             mask = (self.task_ids == task_id)
             if not mask.any():
                 continue
+            
+            task_name = self.task_names[task_id]
                 
             if task_id == 0:  # Reach
-                task_rew, metrics = self._reward_reach_with_metrics(mask)
+                task_rew, metrics, shaped_rew = self._reward_reach_shaped(mask, cfg_shaping)
             elif task_id == 1:  # Button
-                task_rew, metrics = self._reward_button_with_metrics(mask)
+                task_rew, metrics, shaped_rew = self._reward_button_shaped(mask, cfg_shaping)
             elif task_id == 2:  # Cabinet
-                task_rew, metrics = self._reward_cabinet_with_metrics(mask)
+                task_rew, metrics, shaped_rew = self._reward_cabinet_shaped(mask, cfg_shaping)
             elif task_id == 3:  # Ball
-                task_rew, metrics = self._reward_ball_with_metrics(mask)
+                task_rew, metrics, shaped_rew = self._reward_ball_shaped(mask, cfg_shaping)
             else:  # Box tasks (4-7)
-                task_rew, metrics = self._reward_box_task_with_metrics(mask, task_id)
+                task_rew, metrics, shaped_rew = self._reward_box_task_shaped(mask, task_id, cfg_shaping)
             
-            self.rew_buf[mask] = task_rew
+            # Total reward = (base + shaped) * difficulty_scale
+            difficulty_scale = TASK_DIFFICULTY_SCALES[task_id]
+            total_rew = (task_rew + shaped_rew) * difficulty_scale
+            self.rew_buf[mask] = total_rew
             
             # Store metrics for this task
-            task_name = self.task_names[task_id]
             for metric_name, value in metrics.items():
                 self.task_metrics[f'task_{task_name}_{metric_name}'] = value
             
             # Track per-task rewards
-            self.task_episode_rewards[task_name][mask] += task_rew
+            self.task_episode_rewards[task_name][mask] += total_rew
             self.task_episode_lengths[task_name][mask] += 1
         
         # Store reward components for logging
@@ -540,6 +753,181 @@ class H1HRLEnv(LeggedRobot):
                 task_name = self.task_names[task_id]
                 self.task_reward_components[task_name]['total'] = self.rew_buf[mask].mean().item()
     
+    # ===================== SHAPED REWARD FUNCTIONS =====================
+    
+    def _reward_reach_shaped(self, mask, cfg):
+        """Reach reward with progress shaping"""
+        # BASE: Original reward
+        base_rew, metrics = self._reward_reach_with_metrics(mask)
+        
+        # Get current error
+        wrist_pos = self.rigid_state[mask][:, self.wrist_indices, :3]
+        target = self.goal_value[mask, :6].reshape(-1, 2, 3)
+        wrist_pos_diff = torch.flatten(wrist_pos - target, start_dim=1)
+        curr_error = torch.mean(torch.abs(wrist_pos_diff), dim=1)
+        
+        # PROGRESS: Reward for reducing error
+        prev_error = self.prev_errors['reach_wrist'][mask]
+        # Skip progress reward on first step (prev_error=0 means just reset)
+        valid_prev = prev_error > 0  # Only compute progress if we have valid prev
+        progress = torch.where(valid_prev, prev_error - curr_error, torch.zeros_like(curr_error))
+        progress_rew = cfg['progress_scale'] * torch.clamp(progress, -0.5, 0.5)  # Clamp extremes
+        
+        # Update previous error
+        self.prev_errors['reach_wrist'][mask] = curr_error.detach()
+        
+        # Total shaped reward (progress only)
+        shaped_rew = progress_rew
+        
+        # Add metrics
+        metrics['progress'] = progress.mean().item()
+        
+        return base_rew, metrics, shaped_rew
+    
+    def _reward_button_shaped(self, mask, cfg):
+        """Button reward with progress shaping"""
+        # BASE: Original reward
+        base_rew, metrics = self._reward_button_with_metrics(mask)
+        
+        # Get current error (wrist to button)
+        left_wrist_pos = self.rigid_state[mask][:, self.wrist_indices[0], :3]
+        button_pos = self.button_pos[mask]
+        wrist_button_diff = left_wrist_pos - button_pos
+        curr_error = torch.mean(torch.abs(wrist_button_diff), dim=1)
+        
+        # PROGRESS: Reward for reducing error
+        prev_error = self.prev_errors['button_wrist'][mask]
+        # Skip progress reward on first step (prev_error=0 means just reset)
+        valid_prev = prev_error > 0
+        progress = torch.where(valid_prev, prev_error - curr_error, torch.zeros_like(curr_error))
+        progress_rew = cfg['progress_scale'] * torch.clamp(progress, -0.5, 0.5)
+        
+        # Update previous error
+        self.prev_errors['button_wrist'][mask] = curr_error.detach()
+        
+        # Total shaped reward (progress only)
+        shaped_rew = progress_rew
+        metrics['progress'] = progress.mean().item()
+        
+        return base_rew, metrics, shaped_rew
+    
+    def _reward_cabinet_shaped(self, mask, cfg):
+        """Cabinet reward with progress shaping"""
+        # BASE: Original reward
+        base_rew, metrics = self._reward_cabinet_with_metrics(mask)
+        
+        # Get current errors
+        wrist_pos = self.rigid_state[mask][:, self.wrist_indices, :3]
+        arti_obj_pos = self.goal_value[mask, :3]
+        wrist_arti_obj_diff = torch.flatten(wrist_pos - arti_obj_pos.unsqueeze(1), start_dim=1)
+        curr_wrist_error = torch.mean(torch.abs(wrist_arti_obj_diff), dim=1)
+        
+        door_diff = self.door_angle[mask] - self.door_target[mask]
+        curr_door_error = torch.abs(door_diff)
+        
+        # PROGRESS: Combined wrist + door progress
+        prev_wrist = self.prev_errors['cabinet_wrist'][mask]
+        prev_door = self.prev_errors['cabinet_door'][mask]
+        
+        # Skip progress reward on first step (prev_error=0 means just reset)
+        valid_prev = (prev_wrist > 0) | (prev_door > 0)
+        progress_wrist = torch.where(valid_prev, prev_wrist - curr_wrist_error, torch.zeros_like(curr_wrist_error))
+        progress_door = torch.where(valid_prev, prev_door - curr_door_error, torch.zeros_like(curr_door_error))
+        
+        # Weight wrist:door = 1:2 (door is harder)
+        progress = progress_wrist + 2.0 * progress_door
+        progress_rew = cfg['progress_scale'] * torch.clamp(progress, -0.5, 0.5)
+        
+        # Update previous errors
+        self.prev_errors['cabinet_wrist'][mask] = curr_wrist_error.detach()
+        self.prev_errors['cabinet_door'][mask] = curr_door_error.detach()
+        
+        # Total shaped reward (progress only)
+        shaped_rew = progress_rew
+        metrics['progress'] = progress.mean().item()
+        
+        return base_rew, metrics, shaped_rew
+    
+    def _reward_ball_shaped(self, mask, cfg):
+        """Ball reward with progress shaping"""
+        # BASE: Original reward
+        base_rew, metrics = self._reward_ball_with_metrics(mask)
+        
+        # Get current errors
+        torso_pos = self.rigid_state[mask][:, self.torso_indices[0], :3].squeeze(1)
+        torso_ball_diff = self.ball_ori_pos[mask] - torso_pos
+        curr_torso_error = torch.mean(torch.abs(torso_ball_diff[:, :2]), dim=1)  # XY only
+        
+        ball_goal_diff = self.ball_pos[mask] - self.ball_target[mask]
+        curr_goal_error = torch.mean(torch.abs(ball_goal_diff), dim=1)
+        
+        # PROGRESS: Combined torso + ball_goal progress
+        prev_torso = self.prev_errors['ball_torso'][mask]
+        prev_goal = self.prev_errors['ball_goal'][mask]
+        
+        # Skip progress reward on first step (prev_error=0 means just reset)
+        valid_prev = (prev_torso > 0) | (prev_goal > 0)
+        progress_torso = torch.where(valid_prev, prev_torso - curr_torso_error, torch.zeros_like(curr_torso_error))
+        progress_goal = torch.where(valid_prev, prev_goal - curr_goal_error, torch.zeros_like(curr_goal_error))
+        
+        # Weight torso:goal = 1:3 (goal is the objective)
+        progress = progress_torso + 3.0 * progress_goal
+        progress_rew = cfg['progress_scale'] * torch.clamp(progress, -0.5, 0.5)
+        
+        # Update previous errors
+        self.prev_errors['ball_torso'][mask] = curr_torso_error.detach()
+        self.prev_errors['ball_goal'][mask] = curr_goal_error.detach()
+        
+        # Total shaped reward (progress only)
+        shaped_rew = progress_rew
+        metrics['progress'] = progress.mean().item()
+        
+        return base_rew, metrics, shaped_rew
+    
+    def _reward_box_task_shaped(self, mask, task_id, cfg):
+        """Box task reward with progress shaping"""
+        # BASE: Original reward
+        base_rew, metrics = self._reward_box_task_with_metrics(mask, task_id)
+        
+        # Get current errors
+        box_pos = self.box_pos[mask]
+        target = self.box_target[mask]
+        box_pos_diff = box_pos - target
+        curr_box_error = torch.mean(torch.abs(box_pos_diff), dim=1)
+        
+        wrist_pos = self.rigid_state[mask][:, self.wrist_indices, :3]
+        wrist_box_diff = torch.flatten(wrist_pos - box_pos.unsqueeze(1), start_dim=1)
+        curr_wrist_error = torch.mean(torch.abs(wrist_box_diff), dim=1)
+        
+        # PROGRESS: Combined box + wrist progress
+        prev_box = self.prev_errors['box_box'][mask]
+        prev_wrist = self.prev_errors['box_wrist'][mask]
+        
+        # Skip progress reward on first step (prev_error=0 means just reset)
+        valid_prev = (prev_box > 0) | (prev_wrist > 0)
+        progress_box = torch.where(valid_prev, prev_box - curr_box_error, torch.zeros_like(curr_box_error))
+        progress_wrist = torch.where(valid_prev, prev_wrist - curr_wrist_error, torch.zeros_like(curr_wrist_error))
+        
+        # Weight box:wrist varies by task
+        # Box/Lift/Carry: box=2, wrist=1 (focus on moving box)
+        # Transfer: box=1, wrist=1 (balanced)
+        if task_id == 5:  # Transfer
+            progress = progress_box + progress_wrist
+        else:
+            progress = 2.0 * progress_box + progress_wrist
+        
+        progress_rew = cfg['progress_scale'] * torch.clamp(progress, -0.5, 0.5)
+        
+        # Update previous errors
+        self.prev_errors['box_box'][mask] = curr_box_error.detach()
+        self.prev_errors['box_wrist'][mask] = curr_wrist_error.detach()
+        
+        # Total shaped reward (progress only)
+        shaped_rew = progress_rew
+        metrics['progress'] = progress.mean().item()
+        
+        return base_rew, metrics, shaped_rew
+    
     def _reward_reach(self, mask):
         """Reach reward: wrist position to target (without metrics)"""
         rew, _ = self._reward_reach_with_metrics(mask)
@@ -548,25 +936,33 @@ class H1HRLEnv(LeggedRobot):
     def _reward_reach_with_metrics(self, mask):
         """Reach reward: wrist position to target
         
-        Original: scale=5, decay=-4, formula: exp(-4 * error)
-        BALANCED: scale to match ~10 range like other tasks
+        MATCHES ORIGINAL h1_task_reach.py:
+        - wrist_pos scale = 5 (from config)
+        - decay = -4
+        - Formula: 5 * exp(-4 * mean_abs_error)
         Returns: (reward, metrics_dict)
         """
-        # Get wrist positions (2 wrists × 3 dimensions = 6)
-        wrist_pos = self.rigid_state[mask][:, self.wrist_indices, :3]  # [N_masked, 2, 3]
-        wrist_pos = wrist_pos.reshape(mask.sum(), 6)  # [N_masked, 6]
-        target = self.goal_value[mask, :6]  # [N_masked, 6]
+        # Get wrist positions [N_masked, 2, 3] - MATCHES ORIGINAL
+        wrist_pos = self.rigid_state[mask][:, self.wrist_indices, :3]
+        # Target from goal_value [N_masked, 6] (2 wrists × 3 dims)
+        target = self.goal_value[mask, :6].reshape(-1, 2, 3)
         
-        # Mean absolute error - ORIGINAL uses decay=-4
-        error = torch.mean(torch.abs(wrist_pos - target), dim=-1)  # [N_masked]
-        raw_reward = 5.0 * torch.exp(-4.0 * error)  # scale=5, decay=-4 (ORIGINAL)
+        # Position diff [N_masked, 2, 3] then flatten to [N_masked, 6]
+        wrist_pos_diff = wrist_pos - target
+        wrist_pos_diff = torch.flatten(wrist_pos_diff, start_dim=1)  # [N_masked, 6]
         
-        # Metrics - only errors, not rewards (avoid duplication with step_reward)
+        # Mean absolute error - EXACTLY like original
+        wrist_pos_error = torch.mean(torch.abs(wrist_pos_diff), dim=1)  # [N_masked]
+        
+        # Reward: scale=5, decay=-4 (from config rewards.scales.wrist_pos = 5)
+        reward = 5.0 * torch.exp(-4.0 * wrist_pos_error)
+        
+        # Metrics
         metrics = {
-            'wrist_error': error.mean().item(),
+            'wrist_error': wrist_pos_error.mean().item(),
         }
         
-        return raw_reward * 120.0, metrics  # EASY: 150 * 0.8
+        return reward, metrics  # NO BALANCE FACTOR - matches original
     
     def _reward_button(self, mask):
         """Button press reward (without metrics)"""
@@ -576,32 +972,38 @@ class H1HRLEnv(LeggedRobot):
     def _reward_button_with_metrics(self, mask):
         """Button press reward: left wrist to button + right arm default
         
-        Original: wrist_button_distance=5, right_arm_default=0.5, decay=-4
-        BALANCED: scale down by 0.357 (button ~28 -> ~10)
+        MATCHES ORIGINAL h1_task_button.py:
+        - wrist_button_distance scale = 5
+        - right_arm_default scale = 0.5
+        - decay = -4 for both
         Returns: (reward, metrics_dict)
         """
-        # Left wrist to button (scale=5, decay=-4)
+        # Left wrist to button (scale=5, decay=-4) - MATCHES ORIGINAL
+        # Original: wrist_pos[:, 0, :3] - button_goal_pos[:, :3]
         left_wrist_pos = self.rigid_state[mask][:, self.wrist_indices[0], :3]  # [N_masked, 3]
         button_pos = self.button_pos[mask]  # [N_masked, 3]
-        wrist_error = torch.mean(torch.abs(left_wrist_pos - button_pos), dim=-1)
-        rew_wrist = 5.0 * torch.exp(-4.0 * wrist_error)  # scale=5, decay=-4
+        wrist_button_diff = left_wrist_pos - button_pos
+        wrist_button_error = torch.mean(torch.abs(wrist_button_diff), dim=1)
+        rew_wrist = 5.0 * torch.exp(-4.0 * wrist_button_error)  # scale=5
         
-        # Right arm default position (scale=0.5, decay=-4)
-        # Note: default_dof_pos is [1, num_dof], need to broadcast
-        right_arm_dof = self.dof_pos[mask][:, self.right_arm_indices]
-        right_arm_default = self.default_dof_pos[0, self.right_arm_indices]  # [4] - broadcast
-        arm_error = torch.mean(torch.abs(right_arm_dof - right_arm_default), dim=-1)
-        rew_arm = 0.5 * torch.exp(-4.0 * arm_error)  # scale=0.5, decay=-4
+        # Right arm default position (scale=0.5, decay=-4) - MATCHES ORIGINAL
+        # Original: joint_diff[:, 15:] (right_shoulder_pitch to end)
+        right_shoulder_pitch_index = 15
+        joint_diff = self.dof_pos[mask] - self.default_dof_pos
+        right_arm_diff = joint_diff[:, right_shoulder_pitch_index:]  # joints 15-18 (4 joints)
+        right_arm_error = torch.mean(torch.abs(right_arm_diff), dim=1)
+        rew_arm = 0.5 * torch.exp(-4.0 * right_arm_error)  # scale=0.5
         
-        raw_reward = rew_wrist + rew_arm
+        # Total reward = wrist + arm (NO BALANCE FACTOR)
+        reward = rew_wrist + rew_arm
         
-        # Metrics - only errors, not rewards
+        # Metrics
         metrics = {
-            'wrist_error': wrist_error.mean().item(),
-            'arm_error': arm_error.mean().item(),
+            'wrist_error': wrist_button_error.mean().item(),
+            'arm_error': right_arm_error.mean().item(),
         }
         
-        return raw_reward * 0.167, metrics  # EASY: ~4.1 target
+        return reward, metrics  # NO BALANCE FACTOR - matches original
     
     def _reward_cabinet(self, mask):
         """Cabinet task reward (without metrics)"""
@@ -609,34 +1011,40 @@ class H1HRLEnv(LeggedRobot):
         return rew
     
     def _reward_cabinet_with_metrics(self, mask):
-        """Cabinet task reward: both wrists to handle + door angle
+        """Cabinet task reward: both wrists to cabinet + door angle
         
-        Original: wrist_arti_obj_distance=5, arti_obj_dof=5, decay=-4
-        BALANCED: scale up by 1.82 (cabinet ~5.5 -> ~10)
-        Uses BOTH wrists (2×3=6 dims) like original
+        MATCHES ORIGINAL h1_task_cabinet.py:
+        - wrist_arti_obj_distance scale = 5
+        - arti_obj_dof scale = 5
+        - decay = -4 for both
         Returns: (reward, metrics_dict)
         """
-        # Both wrists to door handle (scale=5, decay=-4)
+        # Both wrists to cabinet position (scale=5, decay=-4) - MATCHES ORIGINAL
+        # Original: wrist_pos - arti_obj_pos.unsqueeze(1) then flatten to [N, 6]
         wrist_pos = self.rigid_state[mask][:, self.wrist_indices, :3]  # [N_masked, 2, 3]
-        handle_pos = self.goal_value[mask, :3]  # Handle position [N_masked, 3]
-        # Expand handle_pos to match wrist shape
-        wrist_handle_diff = wrist_pos - handle_pos.unsqueeze(1)  # [N_masked, 2, 3]
-        wrist_error = torch.mean(torch.abs(wrist_handle_diff.reshape(mask.sum(), 6)), dim=-1)
-        rew_wrist = 5.0 * torch.exp(-4.0 * wrist_error)  # scale=5, decay=-4
+        arti_obj_pos = self.goal_value[mask, :3]  # Cabinet/handle position [N_masked, 3]
+        wrist_arti_obj_diff = wrist_pos - arti_obj_pos.unsqueeze(1)  # [N_masked, 2, 3]
+        wrist_arti_obj_diff = torch.flatten(wrist_arti_obj_diff, start_dim=1)  # [N_masked, 6]
+        wrist_arti_obj_error = torch.mean(torch.abs(wrist_arti_obj_diff), dim=1)
+        rew_wrist = 5.0 * torch.exp(-4.0 * wrist_arti_obj_error)  # scale=5
         
-        # Door angle to target (scale=5, decay=-4)
-        angle_error = torch.abs(self.door_angle[mask] - self.door_target[mask])
-        rew_door = 5.0 * torch.exp(-4.0 * angle_error)  # scale=5, decay=-4
+        # Door DOF to target (scale=5, decay=-4) - MATCHES ORIGINAL
+        # Original: arti_obj_dof_state[:, :, 0] - arti_obj_dof_goal (2 DOFs)
+        # Simplified: single door angle
+        arti_obj_dof_diff = self.door_angle[mask] - self.door_target[mask]
+        arti_obj_dof_error = torch.abs(arti_obj_dof_diff)
+        rew_door = 5.0 * torch.exp(-4.0 * arti_obj_dof_error)  # scale=5
         
-        raw_reward = rew_wrist + rew_door
+        # Total reward = wrist + door (NO BALANCE FACTOR)
+        reward = rew_wrist + rew_door
         
-        # Metrics - only errors, not rewards
+        # Metrics
         metrics = {
-            'wrist_error': wrist_error.mean().item(),
-            'door_error': angle_error.mean().item(),
+            'wrist_error': wrist_arti_obj_error.mean().item(),
+            'door_error': arti_obj_dof_error.mean().item(),
         }
         
-        return raw_reward * 0.728, metrics  # EASY: 0.91 * 0.8
+        return reward, metrics  # NO BALANCE FACTOR - matches original
     
     def _reward_ball(self, mask):
         """Ball kick reward (without metrics)"""
@@ -644,35 +1052,38 @@ class H1HRLEnv(LeggedRobot):
         return rew
     
     def _reward_ball_with_metrics(self, mask):
-        """Ball kick reward: torso to ball + ball to goal
+        """Ball kick reward: torso to original ball position + ball to goal
         
-        Original: torso_pos=1 (decay=-4), ball_pos=5 (decay=-1)
-        BALANCED: scale down by 0.182 (ball ~55 -> ~10)
-        NOTE: torso reward uses ORIGINAL ball position (where ball started)
+        MATCHES ORIGINAL h1_task_ball.py:
+        - torso_pos scale = 1, decay = -4 (XY only)
+        - ball_pos scale = 5, decay = -1 (XYZ, special slow decay!)
         Returns: (reward, metrics_dict)
         """
-        # Torso to ORIGINAL ball position (xy only, scale=1, decay=-4)
-        torso_pos = self.rigid_state[mask][:, self.torso_indices[0], :2]  # [N_masked, 2]
-        # Use ball_target as proxy for original ball position direction
-        ori_ball_xy = self.ball_pos[mask, :2]  # Current ball pos as approximation
-        torso_error = torch.mean(torch.abs(torso_pos - ori_ball_xy), dim=-1)
-        rew_torso = 1.0 * torch.exp(-4.0 * torso_error)  # scale=1, decay=-4
+        # Torso to ORIGINAL ball position (XY only, scale=1, decay=-4) - MATCHES ORIGINAL
+        # Original: ori_ball_pos - torso_pos, only [:2] for xy
+        torso_pos = self.rigid_state[mask][:, self.torso_indices[0], :3].squeeze(1)  # [N_masked, 3]
+        # ori_ball_pos is stored in ball_ori_pos (initial position)
+        torso_ori_ball_pos_diff = self.ball_ori_pos[mask] - torso_pos
+        torso_ori_ball_pos_diff = torso_ori_ball_pos_diff[:, :2]  # Only XY
+        torso_ori_ball_pos_error = torch.mean(torch.abs(torso_ori_ball_pos_diff), dim=1)
+        rew_torso = 1.0 * torch.exp(-4.0 * torso_ori_ball_pos_error)  # scale=1
         
-        # Ball to goal (xyz, scale=5, decay=-1)
-        ball_pos = self.ball_pos[mask]  # [N_masked, 3]
-        goal_pos = self.ball_target[mask]  # [N_masked, 3]
-        ball_error = torch.mean(torch.abs(ball_pos - goal_pos), dim=-1)
-        rew_ball = 5.0 * torch.exp(-1.0 * ball_error)  # scale=5, decay=-1 (ORIGINAL)
+        # Ball to goal (XYZ, scale=5, decay=-1) - MATCHES ORIGINAL (special decay!)
+        # Original: ball_root_states[:, :3] - goal_pos
+        ball_goal_diff = self.ball_pos[mask] - self.ball_target[mask]
+        ball_goal_error = torch.mean(torch.abs(ball_goal_diff), dim=1)
+        rew_ball = 5.0 * torch.exp(-1.0 * ball_goal_error)  # scale=5, decay=-1 (SPECIAL!)
         
-        raw_reward = rew_torso + rew_ball
+        # Total reward = torso + ball (NO BALANCE FACTOR)
+        reward = rew_torso + rew_ball
         
-        # Metrics - only errors, not rewards
+        # Metrics
         metrics = {
-            'torso_error': torso_error.mean().item(),
-            'goal_error': ball_error.mean().item(),
+            'torso_error': torso_ori_ball_pos_error.mean().item(),
+            'goal_error': ball_goal_error.mean().item(),
         }
         
-        return raw_reward * 0.091, metrics  # MEDIUM: 0.091 * 1.0
+        return reward, metrics  # NO BALANCE FACTOR - matches original
     
     def _reward_box_task(self, mask, task_id):
         """Box manipulation reward (without metrics)"""
@@ -680,61 +1091,43 @@ class H1HRLEnv(LeggedRobot):
         return rew
     
     def _reward_box_task_with_metrics(self, mask, task_id):
-        """Box manipulation reward: box position to target + wrist proximity
+        """Box manipulation reward: box position to target + wrist to box distance
         
-        Original scales:
-        - box: box_pos=5, wrist_box_distance=5 (both wrists)
-        - transfer: box_pos=5, wrist_box_distance=1 (both wrists)
-        - lift: box_pos=5 (z-only), wrist_box_distance=5 (both wrists)
-        - carry: box_pos=5, wrist_box_distance=5 (both wrists)
-        All use decay=-4
-        
-        BALANCED:
-        - box: ~82 * 0.122 = ~10
-        - transfer: ~80 * 0.125 = ~10
-        - lift: ~105 * 0.095 = ~10
-        - carry: ~85 * 0.118 = ~10
-        
+        MATCHES ORIGINAL h1_task_box/transfer/lift/carry.py:
+        - box_pos scale = 5, decay = -4 (all tasks)
+        - wrist_box_distance scale = 5 (box/lift/carry) or 1 (transfer), decay = -4
         Returns: (reward, metrics_dict)
         """
+        # Box position to goal (scale=5, decay=-4) - MATCHES ORIGINAL
+        # Original: box_root_states[:, :3] - box_goal_pos
         box_pos = self.box_pos[mask]        # [N_masked, 3]
         target = self.box_target[mask]      # [N_masked, 3]
+        box_pos_diff = box_pos - target
+        box_pos_error = torch.mean(torch.abs(box_pos_diff), dim=1)
+        rew_box = 5.0 * torch.exp(-4.0 * box_pos_error)  # scale=5
         
-        # For lift task, only check z-axis for box_pos
-        if task_id == 6:  # Lift
-            box_error = torch.abs(box_pos[:, 2] - target[:, 2])  # z-only
-        else:
-            box_error = torch.mean(torch.abs(box_pos - target), dim=-1)  # all axes
-        
-        rew_box = 5.0 * torch.exp(-4.0 * box_error)  # scale=5, decay=-4 (ORIGINAL)
-        
-        # BOTH wrists to box proximity (matches original wrist_box_distance)
+        # Wrist to box distance (scale varies, decay=-4) - MATCHES ORIGINAL
+        # Original: wrist_pos[:,:,:3] - box_pos.unsqueeze(1), flatten to [N, 6]
         wrist_pos = self.rigid_state[mask][:, self.wrist_indices, :3]  # [N_masked, 2, 3]
         box_pos_expanded = box_pos.unsqueeze(1)  # [N_masked, 1, 3]
         wrist_box_diff = wrist_pos - box_pos_expanded  # [N_masked, 2, 3]
-        wrist_error = torch.mean(torch.abs(wrist_box_diff.reshape(mask.sum(), 6)), dim=-1)
+        wrist_pos_diff = torch.flatten(wrist_box_diff, start_dim=1)  # [N_masked, 6]
+        wrist_box_error = torch.mean(torch.abs(wrist_pos_diff), dim=1)
         
-        # Scale: transfer=1, others=5 (ORIGINAL)
+        # Scale: transfer=1, others=5 (from original configs)
         wrist_scale = 1.0 if task_id == 5 else 5.0
-        rew_grasp = wrist_scale * torch.exp(-4.0 * wrist_error)  # decay=-4
+        rew_wrist = wrist_scale * torch.exp(-4.0 * wrist_box_error)
         
-        raw_reward = rew_box + rew_grasp
+        # Total reward = box + wrist (NO BALANCE FACTOR)
+        reward = rew_box + rew_wrist
         
-        # BALANCE factors per task_id with curriculum (Easy×0.8, Medium×1.0, Hard×1.3)
-        balance_factors = {
-            4: 0.061,   # box (MEDIUM): 0.061 * 1.0 = ~4.9
-            5: 0.08125, # transfer (HARD): 0.0625 * 1.3 = ~6.5
-            6: 0.0475,  # lift (MEDIUM): 0.0475 * 1.0 = ~5
-            7: 0.0767,  # carry (HARD): 0.059 * 1.3 = ~6.5
-        }
-        
-        # Metrics - only errors, not rewards
+        # Metrics
         metrics = {
-            'box_error': box_error.mean().item(),
-            'wrist_error': wrist_error.mean().item(),
+            'box_error': box_pos_error.mean().item(),
+            'wrist_error': wrist_box_error.mean().item(),
         }
         
-        return raw_reward * balance_factors[task_id], metrics
+        return reward, metrics  # NO BALANCE FACTOR - matches original
     
     def reset_idx(self, env_ids):
         """Reset specified environments with per-task stats logging"""
@@ -760,6 +1153,11 @@ class H1HRLEnv(LeggedRobot):
             self.task_episode_rewards[name][env_ids] = 0.0
             self.task_episode_lengths[name][env_ids] = 0.0
         
+        # Reset prev_errors for progress tracking
+        if hasattr(self, 'prev_errors'):
+            for key in self.prev_errors:
+                self.prev_errors[key][env_ids] = 0.0
+        
         # Call parent reset
         super().reset_idx(env_ids)
         
@@ -771,33 +1169,26 @@ class H1HRLEnv(LeggedRobot):
         return {name: self.task_avg_rewards[name] for name in self.task_names}
     
     def get_task_stats(self):
-        """Get task statistics for logging (called by train_hrl.py)
+        """Get task statistics for logging - SIMPLIFIED to match original format
         
-        Returns dict with keys like 'episode_reward/reach', 'step_reward/reach', etc.
-        Also includes per-task metrics with prefix 'task_<taskname>_<metric>'
+        Returns dict with keys matching original single-task format:
+        - Episode/rew_<task>: Episode reward per task
+        - Metric/<task>_<error>: Error metrics per task (for monitoring convergence)
         """
         stats = {}
         
-        # Episode rewards (cumulative)
+        # Episode rewards per task (matches original Episode/rew_<name> format)
         for name in self.task_names:
-            stats[f'episode_reward/{name}'] = self.task_avg_rewards[name]
+            stats[f'Episode/rew_{name}'] = self.task_avg_rewards[name]
         
-        # Step rewards (current instantaneous from task_reward_components)
-        for name in self.task_names:
-            if name in self.task_reward_components:
-                stats[f'step_reward/{name}'] = self.task_reward_components[name].get('total', 0.0)
-            else:
-                stats[f'step_reward/{name}'] = 0.0
-        
-        # Per-task metrics (e.g., TaskMetric/reach_wrist_error, TaskMetric/ball_goal_error)
+        # Error metrics per task (matches original Metric/<name> format)
+        # These are ESSENTIAL for monitoring - when near 0, learning is good!
         if hasattr(self, 'task_metrics'):
             for key, value in self.task_metrics.items():
-                # Add TaskMetric/ prefix for separate wandb section
-                stats[f'TaskMetric/{key}'] = value
-        
-        # Raw data for advanced logging
-        stats['rewards'] = self.task_avg_rewards.copy()
-        stats['counts'] = self.task_episode_counts.copy()
+                # key format: task_<taskname>_<metric> -> Metric/<taskname>_<metric>
+                # e.g., task_reach_wrist_error -> Metric/reach_wrist_error
+                metric_key = key.replace('task_', '')  # Remove 'task_' prefix
+                stats[f'Metric/{metric_key}'] = value
         
         return stats
     

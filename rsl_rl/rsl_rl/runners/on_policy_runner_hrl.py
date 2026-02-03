@@ -11,7 +11,7 @@ import numpy as np
 import wandb
 
 from rsl_rl.algorithms import PPO_HRL
-from rsl_rl.modules import ActorCriticHRL
+# Note: ActorCriticHRL is loaded via eval() from config, no direct import needed
 
 
 class OnPolicyRunnerHRL:
@@ -49,7 +49,8 @@ class OnPolicyRunnerHRL:
         
         self.use_vision = self.env.cfg.sensor.enable_sensor if hasattr(self.env.cfg, 'sensor') else False
         
-        # Actor-Critic initialization
+        # Actor-Critic initialization (import locally to avoid circular import)
+        from rsl_rl.modules import ActorCriticHRL
         actor_critic_class = eval(self.cfg["policy_class_name"])  # ActorCriticHRL
         if hasattr(self.env, 'obs_context_len'):
             obs_context_len = self.env.obs_context_len
@@ -74,6 +75,13 @@ class OnPolicyRunnerHRL:
             device=self.device,
             **self.alg_cfg
         )
+        
+        # === INITIAL TASK WEIGHTS FROM CURRICULUM ===
+        # Set task weights BEFORE training starts (iteration 0)
+        initial_params = self.alg.update_curriculum(0)
+        task_weights = initial_params.get('task_weights', [1/8]*8)
+        self.env.set_task_weights(task_weights)
+        print(f"[HRL] Initial phase 0: Focus task = 0, Task weights = {[f'{w:.2f}' for w in task_weights]}")
         
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
@@ -150,8 +158,8 @@ class OnPolicyRunnerHRL:
         self.tot_iter = self.current_learning_iteration + num_learning_iterations
         self.start_iter = self.current_learning_iteration
         
-        # Track stage transitions
-        last_stage = 1
+        # Track previous phase for logging
+        prev_phase = -1
         
         for it in range(self.start_iter, self.tot_iter):
             start = time.time()
@@ -159,18 +167,14 @@ class OnPolicyRunnerHRL:
             # === UPDATE CURRICULUM ===
             curriculum_params = self.alg.update_curriculum(it)
             
-            # Log stage transition
-            if curriculum_params['stage'] != last_stage:
-                print(f"\n{'='*70}")
-                print(f"🎯 STAGE TRANSITION: Stage {last_stage} → Stage {curriculum_params['stage']}")
-                print(f"{'='*70}")
-                print(f"  K: {curriculum_params['K']}")
-                print(f"  ε: {curriculum_params['epsilon']:.4f}")
-                print(f"  τ: {curriculum_params['tau']:.2f}")
-                print(f"  c_ent_skill: {curriculum_params['c_ent_skill']:.4f}")
-                print(f"  lr_cmd_ratio: {curriculum_params['lr_cmd_ratio']:.2f}")
-                print(f"{'='*70}\n")
-                last_stage = curriculum_params['stage']
+            # === UPDATE TASK WEIGHTS IF PHASE CHANGED ===
+            current_phase = curriculum_params.get('phase', 0)
+            if current_phase != prev_phase:
+                task_weights = curriculum_params.get('task_weights', [1/8]*8)
+                self.env.set_task_weights(task_weights)
+                print(f"\n[HRL] Phase {current_phase}: Focus task = {current_phase}, "
+                      f"Active tasks = {curriculum_params.get('active_tasks', [0])}")
+                prev_phase = current_phase
             
             # === ROLLOUT ===
             with torch.inference_mode():
@@ -288,63 +292,44 @@ class OnPolicyRunnerHRL:
         mean_std = std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
         
+        # === LOSS (matches original) ===
         wandb_dict['Loss/value_function'] = locs['mean_value_loss']
         wandb_dict['Loss/surrogate'] = locs['mean_surrogate_loss']
         wandb_dict['Loss/learning_rate'] = self.alg.learning_rate
         
-        # HRL-specific entropy logging
-        wandb_dict['Entropy/total'] = self.alg.mean_entropy
+        # === ENTROPY (HRL-specific) ===
         wandb_dict['Entropy/skill'] = self.alg.mean_entropy_skill
-        wandb_dict['Entropy/command'] = self.alg.mean_entropy_command
-        wandb_dict['Entropy/action'] = self.alg.mean_entropy_action
         
-        # Curriculum parameters
-        wandb_dict['Curriculum/stage'] = curriculum_params['stage']
+        # === CURRICULUM (HRL-specific) ===
         wandb_dict['Curriculum/K'] = curriculum_params['K']
         wandb_dict['Curriculum/epsilon'] = curriculum_params['epsilon']
         wandb_dict['Curriculum/tau'] = curriculum_params['tau']
-        wandb_dict['Curriculum/c_ent_skill'] = curriculum_params['c_ent_skill']
-        wandb_dict['Curriculum/lr_cmd_ratio'] = curriculum_params['lr_cmd_ratio']
+        wandb_dict['Curriculum/phase'] = curriculum_params.get('phase', 0)
+        wandb_dict['Curriculum/focus_task'] = curriculum_params.get('focus_task', 0)
         
-        # HRL skill metrics
-        skill_hist = self.alg.actor_critic.get_skill_histogram()
-        if skill_hist is not None:
-            for i, prob in enumerate(skill_hist):
-                wandb_dict[f'Skill/histogram_{self.skill_names[i]}'] = prob.item()
-            self.skill_histogram_buffer.append(skill_hist.cpu().numpy())
-        
+        # === SKILL METRICS (HRL-specific, switch_rate only) ===
         switch_rate = self.alg.actor_critic.get_skill_switch_rate()
         wandb_dict['Skill/switch_rate'] = switch_rate
-        wandb_dict['Skill/expected_switch_rate'] = 1.0 / curriculum_params['K']
         self.skill_switch_rate_buffer.append(switch_rate)
         
-        # Reward per skill
-        for skill_id in range(self.num_skills):
-            if self.skill_step_count[skill_id] > 0:
-                avg_reward = (self.skill_reward_sum[skill_id] / self.skill_step_count[skill_id]).item()
-                wandb_dict[f'SkillReward/{self.skill_names[skill_id]}'] = avg_reward
-        # Reset skill reward tracking for next iteration
+        # Reset skill reward tracking (still track internally, just don't log)
         self.skill_reward_sum.zero_()
         self.skill_step_count.zero_()
         
-        # Per-task rewards (if env has get_task_stats)
+        # === PER-TASK REWARDS & METRICS (matches original format) ===
+        # This logs: Episode/rew_<task> and Metric/<task>_<error>
         if hasattr(self.env, 'get_task_stats'):
             task_stats = self.env.get_task_stats()
             for key, value in task_stats.items():
-                if key not in ['rewards', 'counts']:  # Skip raw dicts
-                    wandb_dict[key] = value
+                wandb_dict[key] = value
         
-        # Performance
+        # === PERFORMANCE (matches original) ===
         wandb_dict['Perf/total_fps'] = fps
-        wandb_dict['Perf/collection_time'] = locs['collection_time']
-        wandb_dict['Perf/learning_time'] = locs['learn_time']
+        
+        # === STD (only mean, not per-dim) ===
         wandb_dict['Std/mean_std'] = mean_std
         
-        # Per-dim std
-        for i, std_val in enumerate(self.alg.actor_critic.std):
-            wandb_dict[f'Std/std_dim_{i}'] = std_val
-        
-        # Training metrics
+        # === TRAINING (matches original) ===
         if len(locs['rewbuffer']) > 0:
             wandb_dict['Train/mean_reward'] = statistics.mean(locs['rewbuffer'])
             wandb_dict['Train/mean_episode_length'] = statistics.mean(locs['lenbuffer'])
@@ -368,12 +353,10 @@ class OnPolicyRunnerHRL:
                 f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
                 f"""\n"""
                 f"""{'--- HRL Metrics ---':>{pad}}\n"""
-                f"""{'Stage:':>{pad}} {curriculum_params['stage']}\n"""
                 f"""{'K (option duration):':>{pad}} {curriculum_params['K']}\n"""
                 f"""{'Epsilon (exploration):':>{pad}} {curriculum_params['epsilon']:.4f}\n"""
                 f"""{'Tau (temperature):':>{pad}} {curriculum_params['tau']:.2f}\n"""
                 f"""{'Skill entropy:':>{pad}} {self.alg.mean_entropy_skill:.4f}\n"""
-                f"""{'Command entropy:':>{pad}} {self.alg.mean_entropy_command:.4f}\n"""
                 f"""{'Action entropy:':>{pad}} {self.alg.mean_entropy_action:.4f}\n"""
                 f"""{'Switch rate:':>{pad}} {switch_rate:.4f} (target: {1.0/curriculum_params['K']:.4f})\n"""
             )
@@ -414,7 +397,6 @@ class OnPolicyRunnerHRL:
             'iter': self.current_learning_iteration,
             'curriculum_state': {
                 'iteration': self.alg.curriculum.current_iteration,
-                'stage': self.alg.curriculum.current_stage,
             },
             'infos': infos,
         }, path)
@@ -435,8 +417,7 @@ class OnPolicyRunnerHRL:
         if 'curriculum_state' in loaded_dict:
             curr_state = loaded_dict['curriculum_state']
             self.alg.curriculum.current_iteration = curr_state['iteration']
-            self.alg.curriculum.current_stage = curr_state['stage']
-            print(f"[OnPolicyRunnerHRL] Restored curriculum: iteration={curr_state['iteration']}, stage={curr_state['stage']}")
+            print(f"[OnPolicyRunnerHRL] Restored curriculum: iteration={curr_state['iteration']}")
         
         return loaded_dict['infos']
     

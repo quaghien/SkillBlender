@@ -35,9 +35,8 @@ import torch.nn as nn
 from torch.distributions import Normal
 from torch.nn.modules import rnn
 from copy import deepcopy
-from legged_gym.utils.helpers import class_to_dict
+from rsl_rl.utils import class_to_dict
 import os
-from legged_gym import LEGGED_GYM_ROOT_DIR
 
 class ActorCriticHierarchicalVision(nn.Module):
     is_recurrent = False
@@ -127,8 +126,9 @@ class ActorCriticHierarchicalVision(nn.Module):
         
     def _get_one_policy(self, args, device, task, experiment_name, load_run, checkpoint):
         from legged_gym.utils import task_registry
-        from rsl_rl.modules import ActorCritic
         from legged_gym.utils.helpers import get_load_path
+        from legged_gym import LEGGED_GYM_ROOT_DIR
+        from rsl_rl.modules import ActorCritic
         # get skill arguments
         skill_args = deepcopy(args)
         assert task == experiment_name

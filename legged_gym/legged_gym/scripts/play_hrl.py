@@ -57,8 +57,8 @@ from legged_gym.envs import *
 from legged_gym.utils import get_args, task_registry, Logger
 from legged_gym.utils.helpers import class_to_dict
 
-# Import HRL policy
-from rsl_rl.modules.actor_critic_hrl import ActorCriticHRL
+# Import HRL policy (V2 with hold skill)
+from rsl_rl.modules import ActorCriticHRL
 
 
 # Display settings

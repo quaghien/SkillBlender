@@ -36,8 +36,7 @@ from legged_gym.utils import get_args, task_registry
 
 import torch
 
-# Import HRL policy - Use SIMPLIFIED version
-from rsl_rl.modules.actor_critic_hrl_simple import ActorCriticHRLSimple, create_hrl_policy_simple
+# HRL modules are imported via registry (ActorCriticHRL from rsl_rl.modules)
 
 try:
     import wandb
@@ -65,21 +64,16 @@ def train_hrl(args):
     # Create environment
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
     
-    # Create PPO runner
+    # Create PPO runner (this also creates HRL policy via registry)
     ppo_runner, train_cfg = task_registry.make_alg_runner(
         env=env,
         name=args.task,
         args=args,
     )
     
-    # Create HRL policy - SIMPLIFIED PPO-correct version
+    # Get policy from runner (already created by registry with ActorCriticHRL)
+    policy = ppo_runner.alg.actor_critic
     device = args.rl_device
-    policy = create_hrl_policy_simple(train_cfg, env.num_envs, device)
-    
-    # Override policy in runner
-    ppo_runner.alg.actor_critic = policy
-    ppo_runner.alg.optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
-    ppo_runner.alg.learning_rate = 3e-4  # Sync with optimizer for correct W&B logging
     
     # DEBUG: Print checkpoint load status
     print(f"\n>>> CHECKPOINT STATUS <<<")
@@ -89,46 +83,40 @@ def train_hrl(args):
           else f"⚠️ RESUMED from iteration {ppo_runner.current_learning_iteration}")
     print(f">>> END CHECKPOINT STATUS <<<\n")
     
-    # Training loop with curriculum
-    # FIXED: Use STEPS not iterations for schedule
-    # With 4096 envs × 24 steps = 98304 steps/iter
-    # Phase 1 = 5M steps = ~51 iters, Phase 2 = 5M+ steps
+    # Training loop with simple linear decay curriculum
     max_iterations = train_cfg.runner.max_iterations
     if max_iterations_override > 0:
         max_iterations = max_iterations_override
     
     steps_per_iter = env.num_envs * train_cfg.runner.num_steps_per_env
-    phase1_steps = 4_915_200_000  # 50000 iters × 98,304 steps/iter = 4.9152B steps
-    phase1_iters = phase1_steps // steps_per_iter  # 50000 iters
     
     print(f"\n{'='*60}")
-    print("HIERARCHICAL RL TRAINING")
+    print("HIERARCHICAL RL TRAINING - Simple Curriculum")
     print(f"{'='*60}")
     print(f"Envs: {env.num_envs}")
     print(f"Steps/iter: {steps_per_iter}")
     print(f"Tasks: reach, button, cabinet, ball, box, transfer, lift, carry (8 tasks)")
     print(f"Skills: walk, reach, squat, step")
-    print(f"Phase 1 (Frozen): 0 - {phase1_iters} iters (~4.9B steps)")
-    print(f"Phase 2 (Unfrozen): {phase1_iters}+ iters (~4.9B steps)")
-    print(f"Max iterations: {max_iterations} (~9.8B steps total)")
+    print(f"Max iterations: {max_iterations} ({max_iterations // 8} per task if incremental)")
+    print(f"Curriculum: K={train_cfg.algorithm.K_start}→{train_cfg.algorithm.K_end}, "
+          f"ε={train_cfg.algorithm.epsilon_start}→{train_cfg.algorithm.epsilon_end}, "
+          f"τ={train_cfg.algorithm.tau_start}→{train_cfg.algorithm.tau_end}")
+    print(f"Skill entropy coef: {train_cfg.algorithm.c_ent_skill}")
     print(f"{'='*60}\n")
     
     for iteration in range(max_iterations):
-        # Update curriculum based on STEPS
+        # Update curriculum based on ITERATION (linear decay)
         total_steps = iteration * steps_per_iter
-        policy.set_training_step(total_steps)
+        ppo_runner.alg.update_curriculum(iteration)
         
-        # Logging phase transition
-        if iteration == phase1_iters:
-            print(f"\n>>> PHASE 2: Residual UNFROZEN (clip=±0.05) at {total_steps/1e6:.1f}M steps\n")
+        # Get current curriculum params
+        curriculum_params = ppo_runner.alg.curriculum.get_all_params()
         
         # Training step
         ppo_runner.learn(num_learning_iterations=1, init_at_random_ep_len=(iteration == 0))
         
         # Logging every 10 iters (more frequent for debugging)
         if iteration % 10 == 0:
-            phase = "FROZEN" if iteration < phase1_iters else "UNFROZEN"
-            
             # Get per-task stats
             task_stats = env.get_task_stats()
             
@@ -147,7 +135,9 @@ def train_hrl(args):
                     total_norm += param_norm.item() ** 2
             grad_norm = total_norm ** 0.5
             
-            print(f"\n[{iteration}/{max_iterations}] Steps: {total_steps/1e6:.2f}M, Phase: {phase}")
+            print(f"\n[{iteration}/{max_iterations}] Steps: {total_steps/1e6:.2f}M")
+            print(f"  Curriculum: K={curriculum_params['K']}, ε={curriculum_params['epsilon']:.3f}, τ={curriculum_params['tau']:.2f}")
+            print(f"  Phase: {curriculum_params.get('phase', 0)}, Focus task: {env.task_names[curriculum_params.get('focus_task', 0)]}")
             print(f"  Learning: LR={current_lr:.2e}, grad_norm={grad_norm:.4f}")
             print(f"  Task Dist: reach={task_counts.get('reach', 0)}, button={task_counts.get('button', 0)}, "
                   f"cabinet={task_counts.get('cabinet', 0)}, ball={task_counts.get('ball', 0)}")
@@ -155,38 +145,44 @@ def train_hrl(args):
                   f"lift={task_counts.get('lift', 0)}, carry={task_counts.get('carry', 0)}")
             
             # EPISODE REWARDS (cumulative like single-task)
-            print(f"  Episode Rewards:")
-            print(f"    reach={task_stats.get('episode_reward/reach', 0):.1f}, "
-                  f"button={task_stats.get('episode_reward/button', 0):.1f}, "
-                  f"cabinet={task_stats.get('episode_reward/cabinet', 0):.1f}, "
-                  f"ball={task_stats.get('episode_reward/ball', 0):.1f}")
-            print(f"    box={task_stats.get('episode_reward/box', 0):.1f}, "
-                  f"transfer={task_stats.get('episode_reward/transfer', 0):.1f}, "
-                  f"lift={task_stats.get('episode_reward/lift', 0):.1f}, "
-                  f"carry={task_stats.get('episode_reward/carry', 0):.1f}")
+            # Keys from get_task_stats(): Episode/rew_<task>
+            print(f"  Episode Rewards (avg):")
+            print(f"    reach={task_stats.get('Episode/rew_reach', 0):.1f}, "
+                  f"button={task_stats.get('Episode/rew_button', 0):.1f}, "
+                  f"cabinet={task_stats.get('Episode/rew_cabinet', 0):.1f}, "
+                  f"ball={task_stats.get('Episode/rew_ball', 0):.1f}")
+            print(f"    box={task_stats.get('Episode/rew_box', 0):.1f}, "
+                  f"transfer={task_stats.get('Episode/rew_transfer', 0):.1f}, "
+                  f"lift={task_stats.get('Episode/rew_lift', 0):.1f}, "
+                  f"carry={task_stats.get('Episode/rew_carry', 0):.1f}")
             
-            # STEP REWARDS (instantaneous)
-            print(f"  Step Rewards:")
-            print(f"    reach={task_stats.get('step_reward/reach', 0):.3f}, "
-                  f"button={task_stats.get('step_reward/button', 0):.3f}, "
-                  f"cabinet={task_stats.get('step_reward/cabinet', 0):.3f}, "
-                  f"ball={task_stats.get('step_reward/ball', 0):.3f}")
-            print(f"    box={task_stats.get('step_reward/box', 0):.3f}, "
-                  f"transfer={task_stats.get('step_reward/transfer', 0):.3f}, "
-                  f"lift={task_stats.get('step_reward/lift', 0):.3f}, "
-                  f"carry={task_stats.get('step_reward/carry', 0):.3f}")
+            # METRICS (error values - lower is better)
+            # Keys: Metric/{task}_{metric} from task_metrics[task_{task}_{metric}]
+            print(f"  Metrics (errors):")
+            print(f"    reach_wrist={task_stats.get('Metric/reach_wrist_error', -1):.3f}, "
+                  f"button_wrist={task_stats.get('Metric/button_wrist_error', -1):.3f}, "
+                  f"cabinet_wrist={task_stats.get('Metric/cabinet_wrist_error', -1):.3f}, "
+                  f"ball_torso={task_stats.get('Metric/ball_torso_error', -1):.3f}")
             
-            # Log to wandb
+            # Log to wandb with curriculum params
             if HAS_WANDB and args.wandb:
                 wandb_log = {
                     'iteration': iteration,
                     'total_steps': total_steps,
-                    'phase': 1 if iteration < phase1_iters else 2,
-                    'residual_clip': policy.residual_clip,
-                    'learning/lr': current_lr,
-                    'learning/grad_norm': grad_norm,
+                    # Curriculum
+                    'Curriculum/K': curriculum_params['K'],
+                    'Curriculum/epsilon': curriculum_params['epsilon'],
+                    'Curriculum/tau': curriculum_params['tau'],
+                    'Curriculum/c_ent_skill': curriculum_params['c_ent_skill'],
+                    'Curriculum/phase': curriculum_params.get('phase', 0),
+                    'Curriculum/focus_task': curriculum_params.get('focus_task', 0),
+                    # Learning
+                    'Learning/lr': current_lr,
+                    'Learning/grad_norm': grad_norm,
+                    # Task stats (Episode/rew_*, Metric/*)
                     **task_stats,
-                    **{f'task_count/{k}': v for k, v in task_counts.items()}
+                    # Task distribution (all 8 tasks)
+                    **{f'TaskDist/{k}': v for k, v in task_counts.items()}
                 }
                 wandb.log(wandb_log)
     

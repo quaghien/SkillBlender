@@ -1,126 +1,97 @@
 # HRL Training - Quick Start
 
-## 🚀 Lệnh Chạy
+## 🚀 Train
 
 ```bash
 cd /home/crl/hienhq/SkillBlender/legged_gym
 
-# Train mới (mặc định 4096 envs, 100k iters)
-python legged_gym/scripts/train.py --task h1_hrl --headless
+# Train mới
+python legged_gym/scripts/train_hrl.py --task h1_hrl --headless
 
-# Train với WandB project + run name
-python legged_gym/scripts/train.py --task h1_hrl --headless \
-    --wandb hrlv1_project \
-    --run_name v3
+# Với WandB
+python legged_gym/scripts/train_hrl.py --task h1_hrl --headless --wandb hrlv1 --run_name exp1
 
-# Train với số envs khác (giảm nếu OOM)
-python legged_gym/scripts/train.py --task h1_hrl --headless --num_envs 2048
+# Custom envs/iterations
+python legged_gym/scripts/train_hrl.py --task h1_hrl --headless --num_envs 256 --max_iterations 1000
 
-# Train với max iterations khác
-python legged_gym/scripts/train.py --task h1_hrl --headless --max_iterations 50000
+# Resume
+python legged_gym/scripts/train_hrl.py --task h1_hrl --headless --resume
+```
 
-# Train với seed khác
-python legged_gym/scripts/train.py --task h1_hrl --headless --seed 42
+## 🎮 Play
 
-# Train trên GPU cụ thể
-CUDA_VISIBLE_DEVICES=1 python legged_gym/scripts/train.py --task h1_hrl --headless
-
-# Resume từ checkpoint gần nhất
-python legged_gym/scripts/train.py --task h1_hrl --headless --resume
-
-# Resume từ checkpoint cụ thể
-python legged_gym/scripts/train.py --task h1_hrl --headless --resume --load_run <run_name> --checkpoint <iter>
-
-# Test policy (có GUI)
-python legged_gym/scripts/play.py --task h1_hrl --load_run <run_name> --checkpoint <iter>
-
-# Test không GUI
-python legged_gym/scripts/play.py --task h1_hrl --load_run <run_name> --checkpoint <iter> --headless
+```bash
+python legged_gym/scripts/play_hrl.py --task h1_hrl --load_run <run_name>
 ```
 
 ---
 
-## ⚙️ Config Trong Code
+## ⚙️ Tham số từ Code
 
-### **Curriculum (ppo_hrl.py hoặc h1_hrl.py)**
-```python
-class algorithm:
-    stage1_end = 20000        # Stage 1 kết thúc (explore skills)
-    total_iterations = 100000 # Tổng số iterations
-    
-    K_start = 10              # Option duration ban đầu
-    K_end = 5                 # Option duration cuối
-    
-    epsilon_start = 0.18      # Exploration ε ban đầu
-    epsilon_end = 0.0         # ε cuối (greedy)
-    
-    tau_start = 2.0           # Temperature τ ban đầu (soft sampling)
-    tau_end = 1.0             # τ cuối (sharper)
-    
-    c_ent_skill = 0.02        # Skill entropy bonus
-    entropy_coef = 0.001      # Action entropy bonus
-    
-    learning_rate = 1e-5      # Base learning rate
-    lr_cmd_ratio_stage1 = 0.2 # Command LR = 0.2 × base (stage 1)
-```
+### 🔒 Cố định (KHÔNG đổi - từ h1_hrl.py config)
 
-### **Network (h1_hrl.py)**
-```python
-class policy:
-    num_skills = 4                      # Số skills
-    command_dim = 14                    # Command dimension
-    encoder_hidden_dims = [256]         # Encoder layers
-    skill_hidden_dims = [128]           # Skill head layers
-    command_hidden_dims = [256, 128]    # Command head layers
-    low_hidden_dims = [256, 128]        # Low policy layers
-    critic_hidden_dims = [512, 256, 128]# Critic layers
-```
+| Tham số | Giá trị | File |
+|---------|---------|------|
+| `num_skills` | 4 | policy.num_skills |
+| `num_tasks` | 8 | hardcoded |
+| `num_actions` | 19 | env.num_actions |
+| `num_observations` | 105 | env.num_observations |
+| `num_privileged_obs` | 303 | env.num_privileged_obs (3×101) |
+| `decimation` | 10 | control.decimation (100Hz) |
+| `dt` | 0.001 | sim.dt (1000Hz) |
+| `command_dims` | [3,14,1,4] | skill_dict (total=22) |
 
-### **Environment (h1_hrl.py)**
-```python
-class env:
-    num_envs = 4096           # Số parallel envs (giảm nếu OOM)
-    episode_length_s = 20     # Episode length (seconds)
-    num_observations = 105    # Actor obs dim
-    num_privileged_obs = 303  # Critic obs dim (3 frames × 101)
-```
+### ✅ Tuỳ chỉnh qua CLI args
 
----
+| Tham số | Mặc định | Ghi chú |
+|---------|----------|---------|
+| `--num_envs` | **16384** | Giảm nếu OOM (4096, 8192) |
+| `--max_iterations` | **2000** | Test: 100-500, Full: 2000 |
 
-## 📁 Files HRL
+### 🎚️ Tuỳ chỉnh trong code (h1_hrl.py)
 
-| File | Chức năng |
-|------|-----------|
-| `rsl_rl/modules/actor_critic_hrl.py` | 3-level network: Skill→Command→Action |
-| `rsl_rl/algorithms/ppo_hrl.py` | PPO + Curriculum (2 stages) |
-| `rsl_rl/runners/on_policy_runner_hrl.py` | Training loop + HRL logging |
-| `legged_gym/envs/h1/h1_hrl/h1_hrl.py` | Environment 8 tasks + Config |
+| Tham số | Mặc định | Vị trí |
+|---------|----------|--------|
+| `learning_rate` | 1e-4 | algorithm.learning_rate |
+| `episode_length_s` | 20s | env.episode_length_s |
+| `hold_steps` | 5 | policy.hold_steps |
+| `num_steps_per_env` | 60 | runner.num_steps_per_env |
+| `save_interval` | 500 | runner.save_interval |
 
----
+### 📊 Curriculum (ppo_hrl.py)
 
-## 📊 Curriculum Timeline
+| Tham số | Stage 1 | Stage 2 |
+|---------|---------|---------|
+| Iterations | 0 → 600 | 600 → 2000 |
+| K (hold steps) | 10 | 10 → 5 |
+| ε (exploration) | 0.18 | 0.18 → 0 |
+| τ (temperature) | 2.0 | 2.0 → 1.0 |
+| lr_cmd_ratio | 0.2 | 1.0 |
 
-```
-Iter 0 ━━━━━━━━━━━━━━ 20k ━━━━━━━━━━━━━━━━━━━━━━━ 100k
-      │               │                            │
-   Start         Stage 1→2                      End
+### 🎯 Task Difficulty Scales (h1_hrl.py compute_reward)
 
-Stage 1 (explore): K=10, ε=0.18, τ=2.0, high skill entropy
-Stage 2 (refine):  K→5, ε→0, τ→1.0, converging
-```
+| Task | Scale | Độ khó |
+|------|-------|--------|
+| reach | 1.0 | Easy |
+| button | 1.0 | Easy |
+| cabinet | 0.6 | Easy |
+| ball | 1.5 | Medium |
+| box | 1.0 | Medium |
+| transfer | 2.0 | Hard |
+| lift | 1.0 | Medium |
+| carry | 1.3 | Hard |
 
 ---
 
-## 📈 Metrics Quan Trọng (WandB)
+## 📁 Files chính
 
-| Metric | Stage 1 Target | Stage 2 Target |
-|--------|----------------|----------------|
-| `Skill/histogram_skill_*` | ~25% mỗi skill | Specialization |
-| `Skill/switch_rate` | ~0.1 (1/K=10) | ~0.2 (1/K=5) |
-| `Entropy/skill` | >1.0 | 0.5-0.8 |
-| `Train/mean_reward` | Tăng dần | Converge cao |
-
----
+| File | Mô tả |
+|------|-------|
+| `scripts/train_hrl.py` | Script train |
+| `scripts/play_hrl.py` | Script test |
+| `envs/h1/h1_hrl/h1_hrl.py` | Env + Config + Rewards |
+| `rsl_rl/modules/actor_critic_hrl_v2.py` | HRL Policy |
+| `rsl_rl/algorithms/ppo_hrl.py` | PPO + Curriculum |
 
 ## ⚠️ Troubleshooting
 
