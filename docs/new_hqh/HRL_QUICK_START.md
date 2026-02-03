@@ -9,10 +9,7 @@ cd /home/crl/hienhq/SkillBlender/legged_gym
 python legged_gym/scripts/train_hrl.py --task h1_hrl --headless
 
 # Với WandB
-python legged_gym/scripts/train_hrl.py --task h1_hrl --headless --wandb hrlv1 --run_name exp1
-
-# Custom envs/iterations
-python legged_gym/scripts/train_hrl.py --task h1_hrl --headless --num_envs 256 --max_iterations 1000
+python legged_gym/scripts/train_hrl.py --task h1_hrl --headless --wandb
 
 # Resume
 python legged_gym/scripts/train_hrl.py --task h1_hrl --headless --resume
@@ -26,79 +23,58 @@ python legged_gym/scripts/play_hrl.py --task h1_hrl --load_run <run_name>
 
 ---
 
-## ⚙️ Tham số từ Code
+## ⚙️ Config (h1_hrl.py)
 
-### 🔒 Cố định (KHÔNG đổi - từ h1_hrl.py config)
-
-| Tham số | Giá trị | File |
-|---------|---------|------|
-| `num_skills` | 4 | policy.num_skills |
-| `num_tasks` | 8 | hardcoded |
-| `num_actions` | 19 | env.num_actions |
-| `num_observations` | 105 | env.num_observations |
-| `num_privileged_obs` | 303 | env.num_privileged_obs (3×101) |
-| `decimation` | 10 | control.decimation (100Hz) |
-| `dt` | 0.001 | sim.dt (1000Hz) |
-| `command_dims` | [3,14,1,4] | skill_dict (total=22) |
-
-### ✅ Tuỳ chỉnh qua CLI args
-
-| Tham số | Mặc định | Ghi chú |
-|---------|----------|---------|
-| `--num_envs` | **16384** | Giảm nếu OOM (4096, 8192) |
-| `--max_iterations` | **2000** | Test: 100-500, Full: 2000 |
-
-### 🎚️ Tuỳ chỉnh trong code (h1_hrl.py)
-
-| Tham số | Mặc định | Vị trí |
-|---------|----------|--------|
-| `learning_rate` | 1e-4 | algorithm.learning_rate |
-| `episode_length_s` | 20s | env.episode_length_s |
-| `hold_steps` | 5 | policy.hold_steps |
-| `num_steps_per_env` | 60 | runner.num_steps_per_env |
-| `save_interval` | 500 | runner.save_interval |
-
-### 📊 Curriculum (ppo_hrl.py)
-
-| Tham số | Stage 1 | Stage 2 |
+| Tham số | Giá trị | Ghi chú |
 |---------|---------|---------|
-| Iterations | 0 → 600 | 600 → 2000 |
-| K (hold steps) | 10 | 10 → 5 |
-| ε (exploration) | 0.18 | 0.18 → 0 |
-| τ (temperature) | 2.0 | 2.0 → 1.0 |
-| lr_cmd_ratio | 0.2 | 1.0 |
+| `num_envs` | 16384 | Giảm nếu OOM |
+| `num_skills` | 4 | walk, reach, squat, step |
+| `num_tasks` | 8 | Incremental training |
+| `max_iterations` | 8000 | 1000/task × 8 |
 
-### 🎯 Task Difficulty Scales (h1_hrl.py compute_reward)
+## 📊 Curriculum (Single Stage - Linear Decay)
 
-| Task | Scale | Độ khó |
-|------|-------|--------|
-| reach | 1.0 | Easy |
-| button | 1.0 | Easy |
-| cabinet | 0.6 | Easy |
-| ball | 1.5 | Medium |
-| box | 1.0 | Medium |
-| transfer | 2.0 | Hard |
-| lift | 1.0 | Medium |
-| carry | 1.3 | Hard |
+| Param | Start → End | Ghi chú |
+|-------|-------------|---------|
+| K | 5 | Cố định (option duration) |
+| ε | 0.18 → 0 | Exploration decay |
+| τ | 2.0 → 1.0 | Temperature decay |
+| c_ent_skill | 0.05 | Skill entropy (constant) |
 
----
+## 🎯 Incremental Task Training
+
+| Phase | Iter | Focus Task (70%) | Old Tasks (30%) |
+|-------|------|------------------|-----------------|
+| 0 | 0-999 | reach | - |
+| 1 | 1000-1999 | button | reach |
+| 2 | 2000-2999 | cabinet | reach, button |
+| 3 | 3000-3999 | ball | reach, button, cabinet |
+| 4 | 4000-4999 | box | +ball |
+| 5 | 5000-5999 | lift | +box |
+| 6 | 6000-6999 | transfer | +lift |
+| 7 | 7000-7999 | carry | all |
+
+**Task Order (Easy→Hard):** reach, button, cabinet, ball, box, lift, transfer, carry
 
 ## 📁 Files chính
 
 | File | Mô tả |
 |------|-------|
-| `scripts/train_hrl.py` | Script train |
-| `scripts/play_hrl.py` | Script test |
-| `envs/h1/h1_hrl/h1_hrl.py` | Env + Config + Rewards |
-| `rsl_rl/modules/actor_critic_hrl_v2.py` | HRL Policy |
+| `envs/h1/h1_hrl/h1_hrl.py` | Env + Config |
+| `rsl_rl/modules/actor_critic_hrl_v2.py` | Skill-Aware Policy |
 | `rsl_rl/algorithms/ppo_hrl.py` | PPO + Curriculum |
+
+## 📈 WandB Metrics
+
+- `Curriculum/phase`, `Curriculum/focus_task` - Training progress
+- `Episode/rew_*` - Per-task rewards (8 tasks)
+- `TaskDist/*` - Env distribution per task
+- `Entropy/skill` - Skill selection diversity
 
 ## ⚠️ Troubleshooting
 
 | Vấn đề | Giải pháp |
 |--------|-----------|
-| **Import Error** | `cd rsl_rl && pip install -e . && cd ../legged_gym && pip install -e .` |
-| **CUDA OOM** | `--num_envs 2048` hoặc sửa `num_envs` trong h1_hrl.py |
-| **Skill Collapse** | Tăng `epsilon_start = 0.25`, `tau_start = 2.5` |
-| **Switch rate sai** | Kiểm tra K value trong curriculum |
-| **Reward không tăng** | Kiểm tra task reward functions |
+| CUDA OOM | Giảm `num_envs` trong h1_hrl.py |
+| Skill Collapse | Check `Entropy/skill` > 1.0 |
+| Low Reward | Check phase đúng task chưa |

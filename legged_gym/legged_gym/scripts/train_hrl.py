@@ -135,34 +135,57 @@ def train_hrl(args):
                     total_norm += param_norm.item() ** 2
             grad_norm = total_norm ** 0.5
             
+            # Get active tasks from curriculum
+            active_tasks = curriculum_params.get('active_tasks', [0])
+            focus_task = curriculum_params.get('focus_task', 0)
+            
             print(f"\n[{iteration}/{max_iterations}] Steps: {total_steps/1e6:.2f}M")
             print(f"  Curriculum: K={curriculum_params['K']}, ε={curriculum_params['epsilon']:.3f}, τ={curriculum_params['tau']:.2f}")
-            print(f"  Phase: {curriculum_params.get('phase', 0)}, Focus task: {env.task_names[curriculum_params.get('focus_task', 0)]}")
+            print(f"  Phase: {curriculum_params.get('phase', 0)}, Focus: {env.task_names[focus_task]}, Active: {[env.task_names[i] for i in active_tasks]}")
             print(f"  Learning: LR={current_lr:.2e}, grad_norm={grad_norm:.4f}")
-            print(f"  Task Dist: reach={task_counts.get('reach', 0)}, button={task_counts.get('button', 0)}, "
-                  f"cabinet={task_counts.get('cabinet', 0)}, ball={task_counts.get('ball', 0)}")
-            print(f"             box={task_counts.get('box', 0)}, transfer={task_counts.get('transfer', 0)}, "
-                  f"lift={task_counts.get('lift', 0)}, carry={task_counts.get('carry', 0)}")
             
-            # EPISODE REWARDS (cumulative like single-task)
-            # Keys from get_task_stats(): Episode/rew_<task>
-            print(f"  Episode Rewards (avg):")
-            print(f"    reach={task_stats.get('Episode/rew_reach', 0):.1f}, "
-                  f"button={task_stats.get('Episode/rew_button', 0):.1f}, "
-                  f"cabinet={task_stats.get('Episode/rew_cabinet', 0):.1f}, "
-                  f"ball={task_stats.get('Episode/rew_ball', 0):.1f}")
-            print(f"    box={task_stats.get('Episode/rew_box', 0):.1f}, "
-                  f"transfer={task_stats.get('Episode/rew_transfer', 0):.1f}, "
-                  f"lift={task_stats.get('Episode/rew_lift', 0):.1f}, "
-                  f"carry={task_stats.get('Episode/rew_carry', 0):.1f}")
+            # Task Distribution (only show active tasks with count > 0)
+            dist_parts = [f"{name}={task_counts.get(name, 0)}" for name in env.task_names if task_counts.get(name, 0) > 0]
+            print(f"  Task Dist: {', '.join(dist_parts)}")
             
-            # METRICS (error values - lower is better)
-            # Keys: Metric/{task}_{metric} from task_metrics[task_{task}_{metric}]
-            print(f"  Metrics (errors):")
-            print(f"    reach_wrist={task_stats.get('Metric/reach_wrist_error', -1):.3f}, "
-                  f"button_wrist={task_stats.get('Metric/button_wrist_error', -1):.3f}, "
-                  f"cabinet_wrist={task_stats.get('Metric/cabinet_wrist_error', -1):.3f}, "
-                  f"ball_torso={task_stats.get('Metric/ball_torso_error', -1):.3f}")
+            # Episode Rewards (only active tasks)
+            rew_parts = [f"{env.task_names[i]}={task_stats.get(f'Episode/rew_{env.task_names[i]}', 0):.1f}" for i in active_tasks]
+            print(f"  Rewards: {', '.join(rew_parts)}")
+            
+            # Metrics/Errors (only active tasks - show primary metric for each)
+            # Each task has different metrics: reach→wrist, button→wrist, cabinet→door, ball→torso, box→box
+            task_primary_metrics = {
+                'reach': 'wrist_error',
+                'button': 'wrist_error', 
+                'cabinet': 'door_error',
+                'ball': 'torso_error',
+                'box': 'box_error',
+                'lift': 'box_error',
+                'transfer': 'box_error',
+                'carry': 'box_error',
+            }
+            metric_parts = []
+            for task_idx in active_tasks:
+                task_name = env.task_names[task_idx]
+                metric_name = task_primary_metrics.get(task_name, 'error')
+                metric_key = f'Metric/{task_name}_{metric_name}'
+                value = task_stats.get(metric_key, -1)
+                if value != -1:
+                    metric_parts.append(f"{task_name}={value:.3f}")
+            if metric_parts:
+                print(f"  Errors: {', '.join(metric_parts)}")
+            
+            # Progress rewards (only active tasks)
+            progress_parts = []
+            for task_idx in active_tasks:
+                task_name = env.task_names[task_idx]
+                progress_key = f'Metric/{task_name}_progress'
+                value = task_stats.get(progress_key, None)
+                if value is not None:
+                    sign = "+" if value > 0 else ""
+                    progress_parts.append(f"{task_name}={sign}{value:.3f}")
+            if progress_parts:
+                print(f"  Progress: {', '.join(progress_parts)}")
             
             # Log to wandb with curriculum params
             if HAS_WANDB and args.wandb:
@@ -176,13 +199,12 @@ def train_hrl(args):
                     'Curriculum/c_ent_skill': curriculum_params['c_ent_skill'],
                     'Curriculum/phase': curriculum_params.get('phase', 0),
                     'Curriculum/focus_task': curriculum_params.get('focus_task', 0),
+                    'Curriculum/num_active_tasks': len(active_tasks),
                     # Learning
                     'Learning/lr': current_lr,
                     'Learning/grad_norm': grad_norm,
-                    # Task stats (Episode/rew_*, Metric/*)
+                    # All task stats (Episode/rew_*, Metric/*, TaskDist/*)
                     **task_stats,
-                    # Task distribution (all 8 tasks)
-                    **{f'TaskDist/{k}': v for k, v in task_counts.items()}
                 }
                 wandb.log(wandb_log)
     

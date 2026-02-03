@@ -19,7 +19,7 @@ class H1HRLCfg(LeggedRobotCfg):
     """Configuration for 8-task HRL meta-environment"""
     
     class env(LeggedRobotCfg.env):
-        num_envs = 16384  # 4x reduced for faster policy updates, 2048 per task
+        num_envs = 8192  # 8x reduced, 1024 per task
         num_actions = 19  # H1 DOFs
         frame_stack = 1
         c_frame_stack = 3
@@ -1166,25 +1166,28 @@ class H1HRLEnv(LeggedRobot):
         return {name: self.task_avg_rewards[name] for name in self.task_names}
     
     def get_task_stats(self):
-        """Get task statistics for logging - SIMPLIFIED to match original format
+        """Get task statistics for logging
         
-        Returns dict with keys matching original single-task format:
-        - Episode/rew_<task>: Episode reward per task
-        - Metric/<task>_<error>: Error metrics per task (for monitoring convergence)
+        Returns dict with:
+        - Episode/rew_<task>: Episode reward per task (8 tasks)
+        - Metric/<task>_<metric>: Error/progress metrics per task
+        - TaskDist/<task>: Env count per task
         """
         stats = {}
         
-        # Episode rewards per task (matches original Episode/rew_<name> format)
+        # Episode rewards per task (all 8 tasks, even if 0)
         for name in self.task_names:
             stats[f'Episode/rew_{name}'] = self.task_avg_rewards[name]
         
-        # Error metrics per task (matches original Metric/<name> format)
-        # These are ESSENTIAL for monitoring - when near 0, learning is good!
+        # Task distribution (env counts)
+        for i, name in enumerate(self.task_names):
+            stats[f'TaskDist/{name}'] = (self.task_ids == i).sum().item()
+        
+        # Error metrics per task (from compute_reward)
         if hasattr(self, 'task_metrics'):
             for key, value in self.task_metrics.items():
                 # key format: task_<taskname>_<metric> -> Metric/<taskname>_<metric>
-                # e.g., task_reach_wrist_error -> Metric/reach_wrist_error
-                metric_key = key.replace('task_', '')  # Remove 'task_' prefix
+                metric_key = key.replace('task_', '')
                 stats[f'Metric/{metric_key}'] = value
         
         return stats
