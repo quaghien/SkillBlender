@@ -444,7 +444,8 @@ class H1HRLEnv(LeggedRobot):
         # Shuffle to avoid spatial correlation
         perm = torch.randperm(self.num_envs, device=self.device)
         task_ids = task_ids[perm]
-        print(f"[HRL] Balanced task init: {[(task_ids == i).sum().item() for i in range(8)]} envs per task")
+        # Note: This initial distribution will be overwritten by curriculum in runner
+        print(f"[HRL] Initial task alloc (will be redistributed): {[(task_ids == i).sum().item() for i in range(8)]}")
         return task_ids
     
     def _sample_balanced_tasks(self, env_ids):
