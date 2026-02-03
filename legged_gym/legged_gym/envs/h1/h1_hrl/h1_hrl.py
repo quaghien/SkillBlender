@@ -431,21 +431,17 @@ class H1HRLEnv(LeggedRobot):
         print(f"[HRL] Task redistribution: {counts} envs per task")
     
     def _init_balanced_tasks(self):
-        """Initialize tasks with balanced distribution across envs"""
-        # Default: equal distribution (will be updated by curriculum)
-        self.task_weights = torch.ones(8, dtype=torch.float, device=self.device) / 8
+        """Initialize tasks for phase 0: 100% task 0 (reach)
+        
+        Curriculum will call set_task_weights() to change distribution later.
+        """
+        # Phase 0: All envs start with task 0
+        self.task_weights = torch.zeros(8, dtype=torch.float, device=self.device)
+        self.task_weights[0] = 1.0  # 100% task 0
         
         task_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        envs_per_task = self.num_envs // 8
-        for task_id in range(8):
-            start_idx = task_id * envs_per_task
-            end_idx = start_idx + envs_per_task if task_id < 7 else self.num_envs
-            task_ids[start_idx:end_idx] = task_id
-        # Shuffle to avoid spatial correlation
-        perm = torch.randperm(self.num_envs, device=self.device)
-        task_ids = task_ids[perm]
-        # Note: This initial distribution will be overwritten by curriculum in runner
-        print(f"[HRL] Initial task alloc (will be redistributed): {[(task_ids == i).sum().item() for i in range(8)]}")
+        # All envs = task 0
+        print(f"[HRL] Phase 0 init: All {self.num_envs} envs → task 0 (reach)")
         return task_ids
     
     def _sample_balanced_tasks(self, env_ids):
