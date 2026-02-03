@@ -222,7 +222,7 @@ class H1HRLCfgPPO(LeggedRobotCfgPPO):
         # Simple curriculum (linear decay, no stages)
         c_ent_skill = 0.05    # Skill entropy for diversity (constant)
         total_iterations = 8000  # 8 tasks × 1000 iters each
-        K_start = 10
+        K_start = 5
         K_end = 5
         epsilon_start = 0.18
         epsilon_end = 0.0

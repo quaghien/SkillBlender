@@ -95,7 +95,7 @@ def train_hrl(args):
     print(f"{'='*60}")
     print(f"Envs: {env.num_envs}")
     print(f"Steps/iter: {steps_per_iter}")
-    print(f"Tasks: reach, button, cabinet, ball, box, transfer, lift, carry (8 tasks)")
+    print(f"Tasks: reach, button, cabinet, ball, box, lift, transfer, carry (Easy→Hard)")
     print(f"Skills: walk, reach, squat, step")
     print(f"Max iterations: {max_iterations} ({max_iterations // 8} per task if incremental)")
     print(f"Curriculum: K={train_cfg.algorithm.K_start}→{train_cfg.algorithm.K_end}, "
