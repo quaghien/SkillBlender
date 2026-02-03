@@ -422,9 +422,9 @@ class H1HRLEnv(LeggedRobot):
         
         # Update task assignments
         self.task_ids = new_task_ids
-        self.task_onehot.zero_()
-        for i in range(self.num_envs):
-            self.task_onehot[i, self.task_ids[i]] = 1
+        
+        # CRITICAL: Resample goals for new task distribution!
+        self._sample_goals(torch.arange(self.num_envs, device=self.device))
         
         # Log the new distribution
         counts = [(self.task_ids == i).sum().item() for i in range(8)]
